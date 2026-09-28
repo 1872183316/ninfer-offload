@@ -11,6 +11,7 @@
 
 using namespace ninfer;
 using namespace ninfer::test;
+using namespace ninfer::test::quantized_weight;
 
 namespace {
 
