@@ -31,6 +31,14 @@ struct RowSplitMatrix {
 // are zero. The transform is a permutation; it performs no arithmetic.
 void prepare_activation(const RowSplitMatrix& m, const float* x, float* prepared);
 
+// Position of logical activation column k inside a prepared activation for m.
+[[nodiscard]] inline std::int32_t prepared_position(const RowSplitMatrix& m, std::int32_t k) {
+    if (m.qtype == QType::Q8_G32_FP16) return k;
+    const std::int32_t base = k & ~63;
+    const std::int32_t lane = k & 63;
+    return base + (lane & 1) * 32 + (lane >> 1);
+}
+
 // out[r * out_stride + t] = sum_k W[row_begin + r, k] * x_t[k] for r in [0,rows), t in [0,tokens).
 // prepared holds `tokens` prepared activations separated by prepared_stride floats. Stored codes
 // and binary16 scales are decoded exactly; products and sums use FP32 FMA in a fixed order.
