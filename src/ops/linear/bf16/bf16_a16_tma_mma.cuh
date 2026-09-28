@@ -51,12 +51,18 @@ Bf16TmaDescriptors make_bf16_tma_descriptors(const Bf16A16Operands& p) {
 
 __device__ __forceinline__ void bf16_tma_load(void* destination, const CUtensorMap* map,
                                               int k_sector, int row, std::uint64_t* barrier) {
+    
+#if __CUDA_ARCH__ >= 900
     asm volatile("cp.async.bulk.tensor.3d.shared::cta.global.tile.mbarrier::complete_tx::bytes "
                  "[%0], [%1, {%2, %3, %4}], [%5];"
                  :
                  : "r"(smem_addr(destination)), "l"(map), "r"(0), "r"(k_sector), "r"(row),
                    "r"(smem_addr(barrier))
                  : "memory");
+#else
+    __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
 }
 
 template <class Schedule, class Epilogue>

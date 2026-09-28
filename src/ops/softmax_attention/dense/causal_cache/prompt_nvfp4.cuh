@@ -158,7 +158,13 @@ __launch_bounds__(kCausalPromptNvfp4Threads, 1) void causal_attention_prompt_nvf
     __syncthreads();
 
     if (tid < kCausalPromptNvfp4ProducerThreads) {
+        
+#if __CUDA_ARCH__ >= 900
         asm volatile("setmaxnreg.dec.sync.aligned.u32 40;" : : : "memory");
+#else
+        __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
         const int producer_tid = tid;
         for (int kb = 0; kb < key_blocks; ++kb) {
             const std::uint32_t empty_phase = 1U ^ static_cast<std::uint32_t>(kb & 1);
@@ -166,20 +172,38 @@ __launch_bounds__(kCausalPromptNvfp4Threads, 1) void causal_attention_prompt_nvf
             causal_prompt_nvfp4_decode_tile<Geometry>(k_f16, cache_k, cache_k_scale, block_table,
                                                       kv_head, kb * Bc, max_query_abs,
                                                       producer_tid);
+            
+#if __CUDA_ARCH__ >= 900
             asm volatile("bar.sync 1, %0;" : : "r"(kCausalPromptNvfp4ProducerThreads) : "memory");
+#else
+            __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
             if (producer_tid == 0) { cta_mbarrier_arrive(&barriers->k_full); }
 
             cta_mbarrier_wait(&barriers->v_empty, empty_phase);
             causal_prompt_nvfp4_decode_tile<Geometry>(v_f16, cache_v, cache_v_scale, block_table,
                                                       kv_head, kb * Bc, max_query_abs,
                                                       producer_tid);
+            
+#if __CUDA_ARCH__ >= 900
             asm volatile("bar.sync 1, %0;" : : "r"(kCausalPromptNvfp4ProducerThreads) : "memory");
+#else
+            __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
             if (producer_tid == 0) { cta_mbarrier_arrive(&barriers->v_full); }
         }
         return;
     }
 
+    
+#if __CUDA_ARCH__ >= 900
     asm volatile("setmaxnreg.inc.sync.aligned.u32 232;" : : : "memory");
+#else
+    __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
     const int consumer_tid  = tid - kCausalPromptNvfp4ProducerThreads;
     const int consumer_warp = consumer_tid >> 5;
     const int gid           = lane >> 2;
@@ -261,7 +285,13 @@ __launch_bounds__(kCausalPromptNvfp4Threads, 1) void causal_attention_prompt_nvf
             }
         }
 
+        
+#if __CUDA_ARCH__ >= 900
         asm volatile("bar.sync 2, 128;" : : : "memory");
+#else
+        __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
         if (consumer_tid == 0) { cta_mbarrier_arrive(&barriers->k_empty); }
 
         const int row0             = warp_row0 + gid;
@@ -369,7 +399,13 @@ __launch_bounds__(kCausalPromptNvfp4Threads, 1) void causal_attention_prompt_nvf
             mma_f16(acc[n2 + 1][0], acc[n2 + 1][1], acc[n2 + 1][2], acc[n2 + 1][3], p_frag[k][0],
                     p_frag[k][1], p_frag[k][2], p_frag[k][3], vf[cur][2], vf[cur][3]);
         }
+        
+#if __CUDA_ARCH__ >= 900
         asm volatile("bar.sync 2, 128;" : : : "memory");
+#else
+        __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
         if (consumer_tid == 0) { cta_mbarrier_arrive(&barriers->v_empty); }
     }
 
@@ -392,7 +428,13 @@ __launch_bounds__(kCausalPromptNvfp4Threads, 1) void causal_attention_prompt_nvf
                 make_float2(acc[n][2] * inv_l1, acc[n][3] * inv_l1);
         }
     }
+    
+#if __CUDA_ARCH__ >= 900
     asm volatile("bar.sync 2, 128;" : : : "memory");
+#else
+    __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
 
     for (int row = consumer_warp; row < tile_rows; row += kCausalPromptNvfp4ConsumerWarps) {
         float values[8];

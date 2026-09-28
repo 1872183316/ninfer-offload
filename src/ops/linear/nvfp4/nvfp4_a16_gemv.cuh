@@ -32,20 +32,38 @@ __device__ __forceinline__ Nvfp4CodePack<Values> load_nvfp4_codes(const std::uin
         return load_vec<Nvfp4CodePack<Values>>(pointer);
     } else if constexpr (Values == 8) {
         Nvfp4CodePack<Values> result;
+        
+#if __CUDA_ARCH__ >= 1000
         asm volatile("ld.global.cg.u32 %0, [%1];\n" : "=r"(result.words[0]) : "l"(pointer));
+#else
+        __trap(); // FP4 conversion; NVFP4 routes are not dispatched on sm_89
+#endif
+
         return result;
     } else if constexpr (Values == 16) {
         Nvfp4CodePack<Values> result;
+        
+#if __CUDA_ARCH__ >= 1000
         asm volatile("ld.global.cg.v2.u32 {%0, %1}, [%2];\n"
                      : "=r"(result.words[0]), "=r"(result.words[1])
                      : "l"(pointer));
+#else
+        __trap(); // FP4 conversion; NVFP4 routes are not dispatched on sm_89
+#endif
+
         return result;
     } else {
         Nvfp4CodePack<Values> result;
+        
+#if __CUDA_ARCH__ >= 1000
         asm volatile("ld.global.cg.v4.u32 {%0, %1, %2, %3}, [%4];\n"
                      : "=r"(result.words[0]), "=r"(result.words[1]), "=r"(result.words[2]),
                        "=r"(result.words[3])
                      : "l"(pointer));
+#else
+        __trap(); // FP4 conversion; NVFP4 routes are not dispatched on sm_89
+#endif
+
         return result;
     }
 }

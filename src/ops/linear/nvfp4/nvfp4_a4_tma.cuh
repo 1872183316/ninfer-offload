@@ -131,12 +131,18 @@ __device__ __forceinline__ void nvfp4_tma_load_2d(void* destination, const CUten
                                                   std::int32_t coordinate0,
                                                   std::int32_t coordinate1,
                                                   std::uint64_t* barrier) {
+    
+#if __CUDA_ARCH__ >= 900
     asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes "
                  "[%0], [%1, {%2, %3}], [%4];"
                  :
                  : "r"(smem_addr(destination)), "l"(descriptor), "r"(coordinate0), "r"(coordinate1),
                    "r"(smem_addr(barrier))
                  : "memory");
+#else
+    __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
 }
 
 template <class Schedule, class Epilogue, class OutputPolicy, class Rows>
@@ -173,7 +179,13 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_a4_t
 
     if (threadIdx.x < Schedule::kProducerThreads) {
         if constexpr (Schedule::kProducerThreads == 128) {
+            
+#if __CUDA_ARCH__ >= 900
             asm volatile("setmaxnreg.dec.sync.aligned.u32 40;" : : : "memory");
+#else
+            __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
         }
         if (threadIdx.x == 0) {
 #pragma unroll 1
@@ -230,7 +242,13 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_a4_t
     }
 
     if constexpr (Schedule::kProducerThreads == 128) {
+        
+#if __CUDA_ARCH__ >= 900
         asm volatile("setmaxnreg.inc.sync.aligned.u32 232;" : : : "memory");
+#else
+        __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
     }
     auto& tensors             = shared.scratch.tensors;
     const int consumer_thread = static_cast<int>(threadIdx.x) - Schedule::kProducerThreads;
@@ -314,7 +332,13 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_a4_t
 
     // The epilogue reuses the tensor pipeline's shared-memory storage. All consumer
     // warps must finish their final tensor reads before any warp starts overwriting it.
+    
+#if __CUDA_ARCH__ >= 900
     asm volatile("bar.sync 1, %0;" : : "r"(Schedule::kConsumerThreads) : "memory");
+#else
+    __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
 
     constexpr bool collective = requires {
         epilogue.template finish_tile<Schedule, false>(
@@ -356,7 +380,13 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_a4_t
                     __floats2bfloat162_rn(c, d);
             }
         }
+        
+#if __CUDA_ARCH__ >= 900
         asm volatile("bar.sync 1, %0;" ::"r"(Schedule::kConsumerThreads) : "memory");
+#else
+        __trap(); // SM90+ only; never dispatched on sm_89
+#endif
+
         for (int item = consumer_thread; item < Schedule::kBlockTokens * (Schedule::kBlockRows / 8);
              item += Schedule::kConsumerThreads) {
             const int t = item / (Schedule::kBlockRows / 8),
