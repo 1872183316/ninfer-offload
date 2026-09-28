@@ -29,17 +29,31 @@ launch_dependent(const LaunchConfig& launch, void (*kernel)(KernelArgs...), Call
     config.blockDim         = launch.block;
     config.dynamicSmemBytes = launch.dynamic_smem_bytes;
     config.stream           = launch.stream;
+#if NINFER_TARGET_SM >= 90
     config.attrs            = &attribute;
     config.numAttrs         = 1;
+#else
+    // Pre-Hopper targets have no programmatic dependent launch; ordinary stream order applies.
+    config.attrs            = nullptr;
+    config.numAttrs         = 0;
+#endif
 
     return cudaLaunchKernelEx(&config, kernel, std::forward<CallArgs>(args)...);
 }
 
 // Every producer CTA must call this at least once or exit. This enables dependent scheduling but
 // does not make producer writes visible to the consumer.
-__device__ __forceinline__ void trigger_dependents() { cudaTriggerProgrammaticLaunchCompletion(); }
+__device__ __forceinline__ void trigger_dependents() {
+#if __CUDA_ARCH__ >= 900
+    cudaTriggerProgrammaticLaunchCompletion();
+#endif
+}
 
 // Call on every consumer control path before its first access to producer-dependent data.
-__device__ __forceinline__ void wait_for_dependencies() { cudaGridDependencySynchronize(); }
+__device__ __forceinline__ void wait_for_dependencies() {
+#if __CUDA_ARCH__ >= 900
+    cudaGridDependencySynchronize();
+#endif
+}
 
 } // namespace ninfer::pdl
