@@ -183,6 +183,12 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
         if (object.device || !out.arena_ || geometry.bytes != placement.bytes) {
             throw ArtifactError("invalid or duplicate device placement");
         }
+#if NINFER_TARGET_SM < 120
+        if (geometry.format == QType::NVFP4) {
+            throw ArtifactError(reader.directory().tensor(placement.object).id +
+                                ": NVFP4 weights require an sm_120a build");
+        }
+#endif
         auto storage      = out.arena_->alloc_bytes(static_cast<std::size_t>(placement.bytes),
                                                     static_cast<std::size_t>(placement.alignment));
         const auto offset = static_cast<std::uint64_t>(static_cast<std::byte*>(storage.data) -

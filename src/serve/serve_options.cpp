@@ -50,6 +50,11 @@ KvCacheStorage parse_kv_dtype(const char* text) {
     if (value == "bf16") { return KvCacheStorage::BFloat16; }
     if (value == "int8") { return KvCacheStorage::Int8Group64; }
     if (value == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
+#if NINFER_TARGET_SM < 120
+    if (value == "nvfp4" || value == "k8v4") {
+        throw std::invalid_argument("kv-dtype " + std::string(value) + " requires an sm_120a build");
+    }
+#endif
     if (value == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
     if (value == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
     throw std::invalid_argument("invalid kv-dtype: " + value);

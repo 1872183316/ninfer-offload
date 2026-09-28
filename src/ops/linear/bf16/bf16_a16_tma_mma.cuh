@@ -2,6 +2,7 @@
 
 #include "ops/common/mbarrier.cuh"
 #include "ops/linear/bf16/bf16_mma_common.cuh"
+#include "ops/linear/bf16/bf16_a16_mma.cuh"
 #include "ops/linear/bf16/bf16_operands.h"
 #include "ops/common/token_slices.h"
 #include "ops/common/math.h"
@@ -130,9 +131,31 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_a16_t
                                                token_begin, rows, token_offset + count, warp, lane);
 }
 
+#if NINFER_TARGET_SM < 90
+// Pre-Hopper targets have no TMA. A TMA schedule maps to the cp.async MMA schedule with the same
+// tile geometry and the default shared-memory swizzle; numerics are those of the MMA route.
+template <class Schedule>
+struct Bf16TmaFallbackSchedule;
+
+template <int BR, int BT, int BK, int WR, int WT, int St, int MinB, Bf16MmaRaster Raster, int RG,
+          int K, int Capacity, bool Exact>
+struct Bf16TmaFallbackSchedule<
+    Bf16ScheduleInstance<Bf16A16TmaMmaSchedule<BR, BT, BK, WR, WT, St, MinB, Raster, RG>, K,
+                         Capacity, Exact>> {
+    using type = Bf16ScheduleInstance<
+        Bf16A16MmaSchedule<BR, BT, BK, WR, WT, St, MinB, Cache::cg, Cache::cg,
+                           Bf16MmaFragmentPipeline::PingPong, Raster, Bf16MmaSwizzle::Xor64, RG>,
+        K, Capacity, Exact>;
+};
+#endif
+
 template <class Schedule, class Output, class Epilogue>
 void launch_bf16_a16_tma_mma(const Bf16A16Operands& p, Output output, Epilogue epilogue,
                              cudaStream_t stream) {
+#if NINFER_TARGET_SM < 90
+    launch_bf16_a16_mma<typename Bf16TmaFallbackSchedule<Schedule>::type>(p, output, epilogue,
+                                                                           stream);
+#else
     // Descriptors are launch-owned values, copied into kernel parameters during Graph capture.
     const auto descriptors = make_bf16_tma_descriptors<Schedule>(p);
     for_each_token_slice(p.tokens, Schedule::kBlockTokens, [&](int offset, int count) {
@@ -154,6 +177,7 @@ void launch_bf16_a16_tma_mma(const Bf16A16Operands& p, Output output, Epilogue e
         else
             launch.template operator()<false>();
     });
+#endif
 }
 
 } // namespace ninfer::ops::detail
