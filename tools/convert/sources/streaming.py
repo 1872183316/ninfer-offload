@@ -7,6 +7,7 @@ reads it. This converts checkpoints larger than local disk without changing conv
 
 from __future__ import annotations
 
+import http.client
 import json
 from math import prod
 import os
@@ -19,6 +20,9 @@ import urllib.request
 import torch
 
 from .safetensors import _DTYPES, SafetensorsSource, TensorInfo
+
+# Network failures worth retrying: socket errors and truncated HTTP bodies.
+_TRANSIENT = (OSError, http.client.HTTPException)
 
 # Source tensor names inside LogicalSource labels ("path:name", "concat(a,b)", "rows(...)").
 _NAME = re.compile(r"(?:^|[:(,])((?:model|mtp|lm_head)[A-Za-z0-9_.]*)")
@@ -149,7 +153,7 @@ class StreamingSafetensorsSource(SafetensorsSource):
                             break
                         out.write(chunk)
                         self.downloaded_bytes += len(chunk)
-            except OSError:
+            except _TRANSIENT:
                 time.sleep(min(60, 5 * (attempt + 1)))
         if part.stat().st_size != size:
             raise OSError(f"{path.name}: download incomplete")
@@ -181,13 +185,16 @@ class StreamingSafetensorsSource(SafetensorsSource):
                     self.url + info.file.name,
                     headers={"Range": f"bytes={offset}-{offset + count * word - 1}"},
                 )
+                raw = b""
                 for attempt in range(10):
                     try:
                         with urllib.request.urlopen(request, timeout=60) as response:
                             raw = response.read()
-                        break
-                    except OSError:
-                        time.sleep(3 * (attempt + 1))
+                        if len(raw) == count * word:
+                            break
+                    except _TRANSIENT:
+                        pass
+                    time.sleep(3 * (attempt + 1))
                 if len(raw) != count * word:
                     raise OSError(f"{name}: short remote range read")
                 return torch.frombuffer(bytearray(raw), dtype=dtype)
