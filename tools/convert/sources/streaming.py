@@ -8,6 +8,7 @@ reads it. This converts checkpoints larger than local disk without changing conv
 from __future__ import annotations
 
 import json
+from math import prod
 import os
 from pathlib import Path
 import re
