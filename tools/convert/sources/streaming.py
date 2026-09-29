@@ -174,7 +174,8 @@ class StreamingSafetensorsSource(SafetensorsSource):
         # value that reaches an artifact is read from the complete shard during production.
         info = self.describe(name)
         count = (end if end is not None else prod(info.shape)) - begin
-        if info.file not in self._ready and info.file not in self._fetching:
+        # Only before planning (self._job < 0): production reads go through the shard fetcher.
+        if self._job < 0 and info.file not in self._ready and info.file not in self._fetching:
             dtype, word = _DTYPES[info.dtype]
             if count <= 1:
                 return torch.zeros(max(count, 0), dtype=dtype)
