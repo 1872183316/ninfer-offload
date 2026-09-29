@@ -191,6 +191,7 @@ int check(std::int32_t E, std::int32_t K, std::int32_t H, std::int32_t I, std::i
     double err2 = 0;
     double ref2 = 0;
     double worst = 0;
+    double max_abs = 0;
     for (std::int32_t t = 0; t < T; ++t) {
         std::vector<double> logit(static_cast<std::size_t>(E + 1));
         for (std::int32_t r = 0; r <= E; ++r) {
@@ -236,14 +237,16 @@ int check(std::int32_t E, std::int32_t K, std::int32_t H, std::int32_t I, std::i
             const double e   = from_bf16(got[t * H + r]) - ref;
             err2 += e * e;
             ref2 += ref * ref;
-            // One BF16 rounding of the result plus FP32 accumulation.
-            worst = std::max(worst, std::fabs(e) / (std::fabs(ref) * std::ldexp(1.0, -8) + 1e-3));
+            // One BF16 rounding of the result (<= |ref| 2^-8) plus the FP32 accumulation and
+            // shared-expert gross bound used by the native SparseMoe A16 criterion (4e-3).
+            worst = std::max(worst, std::fabs(e) / (std::fabs(ref) * std::ldexp(1.0, -8) + 4e-3));
+            max_abs = std::max(max_abs, std::fabs(e));
         }
     }
     const double rel = std::sqrt(err2 / std::max(ref2, 1e-300));
     const bool ok    = rel < 4e-3 && worst <= 1.0;
-    std::printf("%s E=%d K=%d H=%d I=%d Is=%d T=%d resident=1/%d relL2=%.3g worst_pointwise=%.3f\n",
-                ok ? "ok  " : "FAIL", E, K, H, I, Is, T, resident_modulo, rel, worst);
+    std::printf("%s E=%d K=%d H=%d I=%d Is=%d T=%d resident=1/%d relL2=%.3g max_abs=%.3g worst_pointwise=%.3f\n",
+                ok ? "ok  " : "FAIL", E, K, H, I, Is, T, resident_modulo, rel, max_abs, worst);
     return ok ? 0 : 1;
 }
 
