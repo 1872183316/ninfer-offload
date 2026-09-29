@@ -96,3 +96,18 @@ stored weights (exact decode of codes and scales) following the reference transf
 a 59-token English paragraph `ninfer-perplexity --moe-offload --kv-dtype bf16` gives mean NLL
 1.44330 against the reference's 1.44474; a 16-token greedy continuation matches the reference
 argmax at 15 positions, the exception being a near tie (reference margin 0.29 nats).
+
+Decode speed on the development host (Xeon E5-2673 v3 12C, DDR3 LRDIMM ~21 GB/s measured read,
+RTX 4060 Ti 16 GB, PCIe 3.0 x8), `ninfer --moe-offload --moe-threads 12 --greedy --no-thinking`,
+`--max-context 2048`, BF16 KV, four prompts (essay, code edit, translation, explanation; 112-512
+generated tokens), two repetitions each, resident experts ranked by routing counts from six
+disjoint calibration prompts (top 64 experts cover 31-54% of routings per layer):
+
+| resident experts per layer | decode tok/s (per prompt) | prefill tok/s |
+|---|---|---|
+| 0 (5.16 GiB device) | 10.0-10.2 | 21.6-29.0 |
+| 48 | 11.9-13.0 | 26.7-33.6 |
+| 64 | 12.5-14.1 | 28.6-35.4 |
+
+Repetitions differ by at most 0.1 tok/s. With no resident experts each token reads ~1.43 GB of
+routed-expert weights on the host (~14.4 GB/s effective).
