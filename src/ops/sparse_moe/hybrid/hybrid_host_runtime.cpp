@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -150,6 +151,17 @@ std::int32_t HybridMoeHostRuntime::add_layer(const HybridSparseMoeWeights& w) {
     layer.counts.assign(static_cast<std::size_t>(w.experts), 0);
     impl_->layers.push_back(std::move(layer));
     return static_cast<std::int32_t>(impl_->layers.size() - 1);
+}
+
+void HybridMoeHostRuntime::write_routing_counts(const std::string& path) const {
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("cannot write MoE routing counts to " + path);
+    for (const auto& layer : impl_->layers) {
+        for (std::size_t e = 0; e < layer.counts.size(); ++e) {
+            out << (e ? " " : "") << layer.counts[e];
+        }
+        out << '\n';
+    }
 }
 
 std::vector<std::vector<std::uint64_t>> HybridMoeHostRuntime::routing_counts() const {

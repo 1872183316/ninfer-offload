@@ -342,6 +342,14 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
 ProgramImpl::~ProgramImpl() noexcept {
     if (device.transfer_stream != nullptr) { (void)cudaStreamSynchronize(device.transfer_stream); }
     if (device.stream != nullptr) { (void)cudaStreamSynchronize(device.stream); }
+    const auto& record = parameters.model.options().moe_offload.record_stats;
+    if (host_moe && !record.empty()) {
+        try {
+            host_moe->write_routing_counts(record.string());
+        } catch (const std::exception&) {
+            // Shutdown cannot report failure; the counts are an optional diagnostic.
+        }
+    }
 }
 
 std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,

@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace ninfer::ops {
@@ -58,6 +59,9 @@ class HybridMoeHostRuntime {
 public:
     HybridMoeHostRuntime(std::int32_t threads, std::int32_t max_tokens, std::int32_t max_hidden,
                          std::int32_t max_top_k);
+
+    // Writes routing_counts() as one whitespace-separated line per registered layer.
+    void write_routing_counts(const std::string& path) const;
     ~HybridMoeHostRuntime();
     HybridMoeHostRuntime(const HybridMoeHostRuntime&)            = delete;
     HybridMoeHostRuntime& operator=(const HybridMoeHostRuntime&) = delete;

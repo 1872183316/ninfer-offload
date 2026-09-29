@@ -159,6 +159,9 @@ struct MoeOffloadOptions {
     // Optional per-layer routing counts (one line of counts per MoE layer) that rank experts for
     // device residency; without it the lowest expert ids are resident.
     std::filesystem::path expert_stats;
+    // When set, per-layer routing counts observed by the host runtime are written here at
+    // shutdown in the expert_stats format.
+    std::filesystem::path record_stats;
 
     bool operator==(const MoeOffloadOptions&) const = default;
 };

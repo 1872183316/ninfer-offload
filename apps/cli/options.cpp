@@ -100,7 +100,7 @@ std::string usage_text(const char* argv0) {
            "       [--reasoning-effort none|minimal|low|medium|high|xhigh|max] [--vision]\n"
            "       [--no-cuda-graph]\n"
            "       [--moe-offload [--moe-gpu-experts N] [--moe-threads N] "
-           "[--moe-expert-stats FILE]]\n"
+           "[--moe-expert-stats FILE] [--moe-record-stats FILE]]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
@@ -185,6 +185,8 @@ Options parse_options(int argc, char** argv) {
             options.moe_offload.host_threads = parse_u32(value(arg), "moe-threads");
         } else if (arg == "--moe-expert-stats") {
             options.moe_offload.expert_stats = value(arg);
+        } else if (arg == "--moe-record-stats") {
+            options.moe_offload.record_stats = value(arg);
         } else if (arg == "--stop-token-id") {
             const std::uint32_t token = parse_u32(value(arg), "stop-token-id", true);
             if (token > static_cast<std::uint32_t>(std::numeric_limits<TokenId>::max())) {
