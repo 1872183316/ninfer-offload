@@ -175,29 +175,25 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         } else {
             launch.template operator()<6, 2, 32, false>();
         }
-    } else if constexpr (TokenTile == 5) {
-        if constexpr (Geometry::GroupSize == 6) {
-            // Two Q row tiles for the 27B group of six.
-            if (implementation_window > 128 && implementation_window <= 512) {
-                launch.template operator()<32, 1, 32, false>();
-            } else if (implementation_window <= 1029) {
-                launch.template operator()<16, 1, 32, false>();
-            } else {
-                launch.template operator()<8, 2, 32, false>();
-            }
+    } else if constexpr (TokenTile == 5 && Geometry::GroupSize == 6) {
+        // Two Q row tiles for the 27B group of six.
+        if (implementation_window > 128 && implementation_window <= 512) {
+            launch.template operator()<32, 1, 32, false>();
+        } else if (implementation_window <= 1029) {
+            launch.template operator()<16, 1, 32, false>();
         } else {
-            // Three Q row tiles for the 35B group of eight. The 24/12-warp
-            // routes retain eight/four consumer warps per tile; the 6-warp
-            // route is reserved for long windows where CTA residency wins.
-            if (implementation_window > 128 && implementation_window <= 512) {
-                launch.template operator()<24, 1, 32, false>();
-            } else if (implementation_window <= 1029) {
-                launch.template operator()<24, 1, 32, false>();
-            } else if (implementation_window <= 4096) {
-                launch.template operator()<12, 1, 32, false>();
-            } else {
-                launch.template operator()<6, 2, 32, false>();
-            }
+            launch.template operator()<8, 2, 32, false>();
+        }
+    } else if constexpr ((TokenTile * Geometry::GroupSize + 15) / 16 == 3) {
+        // Three Q row tiles (35B group of eight at five tokens, group of twelve at three or
+        // four). The 24/12-warp routes retain eight/four consumer warps per tile; the 6-warp
+        // route is reserved for long windows where CTA residency wins.
+        if (implementation_window <= 1029) {
+            launch.template operator()<24, 1, 32, false>();
+        } else if (implementation_window <= 4096) {
+            launch.template operator()<12, 1, 32, false>();
+        } else {
+            launch.template operator()<6, 2, 32, false>();
         }
     } else if constexpr (TokenTile == 4) {
         if (implementation_window <= 1029) {
