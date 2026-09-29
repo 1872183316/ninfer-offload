@@ -236,9 +236,10 @@ TextContext::TextContext(DeviceContext& ctx, const execution::Parameters& weight
                          Tensor& prefill_hidden, std::uint32_t prefill_chunk,
                          std::uint32_t text_kv_base, qwen3_5::PagedKVCacheView mtp_kv,
                          const qwen3_5::PagedKVCache* batch_text_kv,
-                         const qwen3_5::PagedKVCache* batch_mtp_kv)
+                         const qwen3_5::PagedKVCache* batch_mtp_kv,
+                         ops::HybridMoeHostRuntime* host_moe)
     : ctx_(ctx), parameters_(weights), config_(weights.model.config().text), work_(work), kv_(kv),
-      mtp_kv_(mtp_kv), state_(state), io_(io), prefill_hidden_(prefill_hidden),
+      mtp_kv_(mtp_kv), state_(state), host_moe_(host_moe), io_(io), prefill_hidden_(prefill_hidden),
       prefill_chunk_(prefill_chunk), text_kv_base_(text_kv_base), batch_text_kv_(batch_text_kv),
       batch_mtp_kv_(batch_mtp_kv) {
     if (prefill_chunk_ == 0 ||
@@ -1071,7 +1072,7 @@ void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase,
                            const ops::SparseMoeHints& hints) {
     Tensor h = workspace::post_mixer_hidden(work_, config_, x.ne[1]);
     ops::rmsnorm(x, weights.post_attention_norm, config_.rms_norm_eps, true, h, ctx_.stream);
-    ffn(h, weights.ffn, x, hints, work_, ctx_.stream);
+    ffn(h, weights.ffn, x, hints, work_, ctx_.stream, false, host_moe_);
 }
 
 template <class Tap>

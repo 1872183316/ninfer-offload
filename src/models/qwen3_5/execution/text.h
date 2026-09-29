@@ -73,7 +73,8 @@ public:
                 std::uint32_t text_kv_base,
                 qwen3_5::PagedKVCacheView mtp_kv           = qwen3_5::PagedKVCacheView(),
                 const qwen3_5::PagedKVCache* batch_text_kv = nullptr,
-                const qwen3_5::PagedKVCache* batch_mtp_kv  = nullptr);
+                const qwen3_5::PagedKVCache* batch_mtp_kv  = nullptr,
+                ops::HybridMoeHostRuntime* host_moe       = nullptr);
     ~TextContext();
 
     TextContext(const TextContext&)            = delete;
@@ -217,6 +218,7 @@ private:
     const qwen3_5::PagedKVCache* batch_text_kv_ = nullptr;
     const qwen3_5::PagedKVCache* batch_mtp_kv_  = nullptr;
     LinearAttentionStatePool& state_;
+    ops::HybridMoeHostRuntime* host_moe_ = nullptr;
     qwen3_5::RoundState& io_;
     Tensor& prefill_hidden_;
     std::uint32_t prefill_chunk_;

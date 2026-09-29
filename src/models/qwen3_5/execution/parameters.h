@@ -27,7 +27,8 @@ struct DenseParameters {
     LinearParameters down;
 };
 
-using FfnParameters = std::variant<DenseParameters, ops::SparseMoeWeights>;
+using FfnParameters =
+    std::variant<DenseParameters, ops::SparseMoeWeights, ops::HybridSparseMoeWeights>;
 
 struct AttentionParameters {
     ops::ProjectionWeights projection;

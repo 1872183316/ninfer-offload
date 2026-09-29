@@ -11,6 +11,7 @@ struct LoadOptions {
     bool vision                    = false;
     SpeculativeBackend speculative = SpeculativeBackend::None;
     ProposalHead proposal_head     = ProposalHead::Full;
+    MoeOffloadOptions moe_offload;
 
     bool operator==(const LoadOptions&) const = default;
 
@@ -52,11 +53,12 @@ struct LoadOptions {
     return backend == SpeculativeBackend::DFlash || backend == SpeculativeBackend::DFlash2;
 }
 
-[[nodiscard]] inline LoadOptions load_options(const EngineOptions& options) noexcept {
+[[nodiscard]] inline LoadOptions load_options(const EngineOptions& options) {
     return {.purpose       = options.purpose,
             .vision        = options.enable_vision,
             .speculative   = options.speculative.backend,
-            .proposal_head = options.speculative.proposal_head};
+            .proposal_head = options.speculative.proposal_head,
+            .moe_offload   = options.moe_offload};
 }
 
 } // namespace ninfer::models

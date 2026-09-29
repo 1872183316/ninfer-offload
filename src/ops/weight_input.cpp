@@ -252,3 +252,75 @@ prepare_sparse_moe_weights(const WeightInput& router, const WeightInput& shared_
 }
 
 } // namespace ninfer::ops
+
+namespace ninfer::ops {
+
+HybridSparseMoeWeights prepare_hybrid_sparse_moe_weights(
+    const WeightInput& router, const WeightInput& shared_score,
+    std::span<const WeightInput> expert_gate_up, std::span<const WeightInput> expert_down,
+    const WeightInput& shared_gate, const WeightInput& shared_up, const WeightInput& shared_down,
+    std::span<const std::int32_t> resident, const WeightInput* device_gate_up,
+    const WeightInput* device_down, std::int32_t top_k) {
+    const auto experts = expert_down.size();
+    require(experts > 0 && experts <= kHybridMoeMaxExperts && expert_gate_up.size() == 2 * experts,
+            "hybrid MoE: expert count is unsupported");
+    require(top_k > 0 && top_k <= kHybridMoeMaxTopK && static_cast<std::size_t>(top_k) <= experts,
+            "hybrid MoE: top-k is unsupported");
+    const auto hidden       = matrix(router)[1];
+    const auto intermediate = matrix(expert_down.front())[1];
+    require(matrix(router)[0] == experts && matrix(shared_score) == std::vector<std::uint64_t>{1, hidden},
+            "hybrid MoE: router geometry differs");
+    const std::array router_inputs{router, shared_score};
+    const auto router_bank  = single(router_inputs);
+    const auto gate_up_bank = single(expert_gate_up);
+    const auto down_bank    = single(expert_down);
+    const auto shared       = prepare_linear_swiglu_weight(shared_gate, shared_up);
+    const auto shared_d     = prepare_linear_weight(shared_down);
+    const auto row_split    = [](const Weight& w) {
+        return w.layout == QuantLayout::RowSplit &&
+               (w.qtype == QType::Q4_G64_FP16 || w.qtype == QType::Q5_G64_FP16 ||
+                w.qtype == QType::Q6_G64_FP16 || w.qtype == QType::Q8_G32_FP16);
+    };
+    require(router_bank.weight.qtype == QType::BF16 && row_split(gate_up_bank.weight) &&
+                row_split(down_bank.weight) && row_split(shared.weight) && row_split(shared_d.weight),
+            "hybrid MoE: bank formats are unsupported");
+    require(gate_up_bank.weight.n == static_cast<std::int32_t>(2 * experts * intermediate) &&
+                gate_up_bank.weight.k == static_cast<std::int32_t>(hidden) &&
+                down_bank.weight.n == static_cast<std::int32_t>(experts * hidden) &&
+                down_bank.weight.k == static_cast<std::int32_t>(intermediate),
+            "hybrid MoE: expert bank geometry differs");
+
+    HybridSparseMoeWeights out;
+    out.router_shared_gate  = router_bank.weight;
+    out.shared_gate_up      = shared.weight;
+    out.shared_down         = shared_d.weight;
+    out.host_gate_up        = gate_up_bank.weight;
+    out.host_down           = down_bank.weight;
+    out.experts             = static_cast<std::int32_t>(experts);
+    out.top_k               = top_k;
+    out.hidden              = static_cast<std::int32_t>(hidden);
+    out.intermediate        = static_cast<std::int32_t>(intermediate);
+    out.shared_intermediate = shared_d.weight.k;
+    out.slot_of_expert.assign(experts, -1);
+    for (std::size_t s = 0; s < resident.size(); ++s) {
+        const auto e = resident[s];
+        require(e >= 0 && static_cast<std::size_t>(e) < experts &&
+                    out.slot_of_expert[static_cast<std::size_t>(e)] < 0,
+                "hybrid MoE: invalid resident expert list");
+        out.slot_of_expert[static_cast<std::size_t>(e)] = static_cast<std::int16_t>(s);
+    }
+    if (!resident.empty()) {
+        require(device_gate_up && device_down, "hybrid MoE: resident experts need replicas");
+        out.device_gate_up = prepare_linear_weight(*device_gate_up).weight;
+        out.device_down    = prepare_linear_weight(*device_down).weight;
+        require(out.device_gate_up.qtype == out.host_gate_up.qtype &&
+                    out.device_down.qtype == out.host_down.qtype &&
+                    out.device_gate_up.n ==
+                        static_cast<std::int32_t>(resident.size() * 2 * intermediate) &&
+                    out.device_down.n == static_cast<std::int32_t>(resident.size() * hidden),
+                "hybrid MoE: replica geometry differs");
+    }
+    return out;
+}
+
+} // namespace ninfer::ops

@@ -1,6 +1,7 @@
 #include "models/qwen3_5/execution/ffn.h"
 
 #include "core/layout.h"
+#include "ninfer/ops/hybrid_sparse_moe.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
@@ -14,6 +15,9 @@ namespace ninfer::models::qwen3_5::execution {
 std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t first,
                                 std::int32_t last, bool mtp) {
     if (first <= 0 || last < first) { throw std::invalid_argument("FFN: invalid column interval"); }
+    if (const auto* hybrid = std::get_if<ops::HybridSparseMoeWeights>(&parameters)) {
+        return ops::hybrid_sparse_moe_workspace_bytes(*hybrid, last);
+    }
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
         return ops::sparse_moe_workspace_capacity_bytes(moe->routed_gate_up.qtype,
                                                         moe->routed_down.qtype, first, last);
@@ -51,9 +55,17 @@ std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t fi
 
 void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual,
          const ops::SparseMoeHints& hints, WorkspaceArena& workspace, cudaStream_t stream,
-         bool mtp) {
+         bool mtp, ops::HybridMoeHostRuntime* host_moe) {
     auto scope         = workspace.scope();
     const auto columns = hidden.ne[1];
+    if (const auto* hybrid = std::get_if<ops::HybridSparseMoeWeights>(&parameters)) {
+        if (!host_moe) { throw std::logic_error("offloaded MoE layer requires the host runtime"); }
+        const auto storage =
+            workspace.alloc_bytes(ffn_workspace_bytes(parameters, columns, columns));
+        WorkspaceArena scratch(storage);
+        ops::hybrid_sparse_moe(hidden, *hybrid, *host_moe, residual, scratch, stream);
+        return;
+    }
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
         const auto storage =
             workspace.alloc_bytes(ffn_workspace_bytes(parameters, columns, columns));

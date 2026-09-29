@@ -1,4 +1,5 @@
 #pragma once
+#include "ninfer/ops/hybrid_sparse_moe.h"
 #include "models/qwen3_5/program/internal.h"
 
 #include "core/arena.h"
@@ -38,6 +39,8 @@ struct ExecutionCore {
     Tensor& prefill_hidden;
     std::uint32_t prefill_chunk;
     ProposalHead proposal_head;
+    // Program-owned host expert runtime; null unless routed experts are offloaded.
+    ops::HybridMoeHostRuntime* host_moe = nullptr;
 };
 
 struct PrefillContext {

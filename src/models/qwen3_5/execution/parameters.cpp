@@ -64,9 +64,7 @@ public:
     FfnParameters ffn(const BlockWeights& w) const {
         if (const auto* d = std::get_if<DenseWeights>(&w.ffn)) { return dense(*d); }
         const auto& moe = std::get<MoeWeights>(w.ffn);
-        if (std::get<MoeConfig>(model_.config().text.ffn).num_experts_per_tok != 8) {
-            throw std::invalid_argument("SparseMoe implements top-8 routing");
-        }
+        const auto top_k = std::get<MoeConfig>(model_.config().text.ffn).num_experts_per_tok;
         std::vector<ops::WeightInput> gate_up, down;
         gate_up.reserve(2 * moe.experts.size());
         down.reserve(moe.experts.size());
@@ -75,6 +73,24 @@ public:
             gate_up.push_back(model_.input(expert.up));
             down.push_back(model_.input(expert.down));
         }
+        if (moe.offload) {
+            const auto& o = *moe.offload;
+            std::optional<ops::WeightInput> device_gate_up;
+            std::optional<ops::WeightInput> device_down;
+            if (!o.resident.empty()) {
+                device_gate_up.emplace(model_.input(o.device_gate_up));
+                device_down.emplace(model_.input(o.device_down));
+            }
+            return with_context(model_.weight(moe.router).name, [&]() -> FfnParameters {
+                return ops::prepare_hybrid_sparse_moe_weights(
+                    model_.input(moe.router), model_.input(moe.shared_score), gate_up, down,
+                    model_.input(moe.shared.gate), model_.input(moe.shared.up),
+                    model_.input(moe.shared.down), o.resident,
+                    device_gate_up ? &*device_gate_up : nullptr,
+                    device_down ? &*device_down : nullptr, static_cast<std::int32_t>(top_k));
+            });
+        }
+        if (top_k != 8) { throw std::invalid_argument("SparseMoe implements top-8 routing"); }
         return with_context(model_.weight(moe.router).name, [&] {
             return ops::prepare_sparse_moe_weights(
                 model_.input(moe.router), model_.input(moe.shared_score), gate_up, down,
@@ -267,6 +283,13 @@ Parameters::Parameters(const Model& source) : model(source) {
     for (std::size_t i = 0; i < w.text.layers.size(); ++i) {
         text.layers.push_back(with_context("text/layers/" + std::to_string(i),
                                            [&] { return prepare.block(w.text.layers[i]); }));
+    }
+    // Offloaded layers register with the Program's host runtime in this ordinal order.
+    std::int32_t offloaded = 0;
+    for (auto& layer : text.layers) {
+        if (auto* hybrid = std::get_if<ops::HybridSparseMoeWeights>(&layer.ffn)) {
+            hybrid->layer = offloaded++;
+        }
     }
     if (w.mtp) {
         mtp = with_context("mtp", [&] { return prepare.mtp(*w.mtp); });

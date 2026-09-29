@@ -148,6 +148,21 @@ struct ContextCostOptions {
     std::filesystem::path preset_path;
 };
 
+// Routed-expert placement for MoE models whose experts exceed device memory. When enabled, every
+// routed expert bank of the Text layers resides in host memory and is computed by host threads;
+// `resident_experts` experts per layer additionally receive a device replica and run on the GPU.
+struct MoeOffloadOptions {
+    bool enabled                  = false;
+    std::uint32_t resident_experts = 0;
+    // Zero selects the number of physical cores.
+    std::uint32_t host_threads = 0;
+    // Optional per-layer routing counts (one line of counts per MoE layer) that rank experts for
+    // device residency; without it the lowest expert ids are resident.
+    std::filesystem::path expert_stats;
+
+    bool operator==(const MoeOffloadOptions&) const = default;
+};
+
 struct EngineOptions {
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
@@ -167,6 +182,7 @@ struct EngineOptions {
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
     bool use_cuda_graph                    = true;
+    MoeOffloadOptions moe_offload;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;

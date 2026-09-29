@@ -6,6 +6,7 @@
 #include "core/device.h"
 #include "ninfer/ops/target_logprobs.h"
 
+#include <thread>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -84,6 +85,34 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         (workspace_plan.vision &&
          workspace_plan.vision->general_capacity_bytes != workspace_plan.general_capacity)) {
         throw std::invalid_argument("Qwen3.5 workspace plan does not match startup features");
+    }
+    {
+        std::int32_t hidden = 0;
+        std::int32_t top_k  = 0;
+        for (const auto& layer : parameters.text.layers) {
+            if (const auto* h = std::get_if<ops::HybridSparseMoeWeights>(&layer.ffn)) {
+                hidden = std::max(hidden, h->hidden);
+                top_k  = std::max(top_k, h->top_k);
+            }
+        }
+        if (hidden) {
+            const auto& offload = parameters.model.options().moe_offload;
+            const auto threads  = offload.host_threads
+                                      ? static_cast<std::int32_t>(offload.host_threads)
+                                      : std::max(1, static_cast<std::int32_t>(
+                                                        std::thread::hardware_concurrency() / 2));
+            // Every Text call carries at most one prefill chunk or one decode/verify batch.
+            const auto max_tokens = static_cast<std::int32_t>(
+                std::max(prefill_chunk, max_concurrency * (draft_window + 1U)));
+            host_moe = std::make_unique<ops::HybridMoeHostRuntime>(threads, max_tokens, hidden, top_k);
+            for (const auto& layer : parameters.text.layers) {
+                if (const auto* h = std::get_if<ops::HybridSparseMoeWeights>(&layer.ffn)) {
+                    if (host_moe->add_layer(*h) != h->layer) {
+                        throw std::logic_error("offloaded MoE layer order differs from parameters");
+                    }
+                }
+            }
+        }
     }
     const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
     if (!plan.context_cache.max_private_continuations || !plan.context_cache.max_shared_prefixes) {
@@ -409,7 +438,7 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
             const std::uint32_t nominal = std::min(prefill_chunk, predictor_count - cursor);
             execution::PrefillContext schedule_state{
                 {device, parameters, work, state_images->linear(), nullptr, io, prefill_hidden,
-                 prefill_chunk, proposal_head},
+                 prefill_chunk, proposal_head, host_moe.get()},
                 decoder->text_kv.execution_view(text_kv_addresses->execution_row(*address)),
                 {},
                 decoder->text_kv,

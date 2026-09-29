@@ -581,6 +581,8 @@ public:
     DeviceArena persistent;
     DeviceArena workspace_storage;
     WorkspaceArena work;
+    // Host expert runtime for offloaded routed experts; null when every expert is resident.
+    std::unique_ptr<ops::HybridMoeHostRuntime> host_moe;
     std::unique_ptr<qwen3_5::DecoderState> decoder;
     std::unique_ptr<HostKVArena> host_kv_arena;
     std::unique_ptr<LogicalKVPageStore> text_kv_pages;

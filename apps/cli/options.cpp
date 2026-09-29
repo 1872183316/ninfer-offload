@@ -99,12 +99,19 @@ std::string usage_text(const char* argv0) {
            "       [--raw-output] [--print-token-ids] [--no-thinking] [--thinking-budget N]\n"
            "       [--reasoning-effort none|minimal|low|medium|high|xhigh|max] [--vision]\n"
            "       [--no-cuda-graph]\n"
+           "       [--moe-offload [--moe-gpu-experts N] [--moe-threads N] "
+           "[--moe-expert-stats FILE]]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
            "Structured message content accepts text, image/image_url, and video/video_url parts;\n"
            "media sources may be local paths, HTTP(S) URLs, or base64 data URIs.\n"
            "--vision enables image/video input and loads the fixed Vision GPU allocations.\n"
+           "--moe-offload keeps routed MoE experts in host memory and computes them on CPU "
+           "threads;\n"
+           "--moe-gpu-experts places N experts per layer on the GPU, ranked by "
+           "--moe-expert-stats\n"
+           "(one line of per-expert routing counts per layer), else the lowest ids.\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
            "toward --max-new.\n"
            "--kv-capacity auto leaves " +
@@ -170,6 +177,14 @@ Options parse_options(int argc, char** argv) {
             options.enable_vision = true;
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
+        } else if (arg == "--moe-offload") {
+            options.moe_offload.enabled = true;
+        } else if (arg == "--moe-gpu-experts") {
+            options.moe_offload.resident_experts = parse_u32(value(arg), "moe-gpu-experts", true);
+        } else if (arg == "--moe-threads") {
+            options.moe_offload.host_threads = parse_u32(value(arg), "moe-threads");
+        } else if (arg == "--moe-expert-stats") {
+            options.moe_offload.expert_stats = value(arg);
         } else if (arg == "--stop-token-id") {
             const std::uint32_t token = parse_u32(value(arg), "stop-token-id", true);
             if (token > static_cast<std::uint32_t>(std::numeric_limits<TokenId>::max())) {
