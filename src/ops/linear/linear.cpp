@@ -3,6 +3,7 @@
 
 #include "ops/linear/bf16/bf16_dispatch.h"
 #include "ops/linear/fp8/fp8_dispatch.h"
+#include "ops/linear/generic/generic_linear.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch.h"
 #include "ops/linear/q4/q4_dispatch.h"
 #include "ops/linear/q5/q5_dispatch.h"
@@ -74,8 +75,30 @@ void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& o
     validate_linear_policy(policy);
 }
 
+// Shapes without a tuned schedule use the runtime-geometry A16 route.
+bool uses_generic_route(QType qtype, std::int32_t n, std::int32_t k) {
+    switch (qtype) {
+    case QType::Q4_G64_FP16:
+        return !detail::q4_shape_registered(n, k);
+    case QType::Q5_G64_FP16:
+        return !detail::q5_shape_registered(n, k);
+    case QType::Q6_G64_FP16:
+        return !detail::q6_shape_registered(n, k);
+    case QType::Q8_G32_FP16:
+        return !detail::q8_shape_registered(n, k);
+    case QType::BF16:
+        return !detail::bf16_shape_registered(n, k);
+    default:
+        return false;
+    }
+}
+
 void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
                      WorkspaceArena* workspace, cudaStream_t stream) {
+    if (uses_generic_route(w.qtype, w.n, w.k)) {
+        detail::generic_linear(x, w, out, stream);
+        return;
+    }
     switch (w.qtype) {
     case QType::Q4_G64_FP16:
         detail::q4_dispatch(x, w, out, policy, stream);
@@ -114,6 +137,7 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("linear workspace: invalid token interval");
     }
+    if (uses_generic_route(qtype, output_rows, input_rows)) { return 0; }
 
     switch (qtype) {
     case QType::Q4_G64_FP16:

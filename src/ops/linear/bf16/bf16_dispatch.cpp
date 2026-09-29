@@ -25,6 +25,13 @@ Bf16Launch select_bf16_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t
     throw std::invalid_argument("bf16 linear: unsupported shape");
 }
 
+bool bf16_shape_registered(std::int32_t n, std::int32_t k) noexcept {
+    for (const auto& entry : kShapes) {
+        if (entry.n == n && entry.k == k) return true;
+    }
+    return false;
+}
+
 Bf16Launch select_bf16_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy) {
     if (!valid_linear_policy(policy))
         throw std::invalid_argument("bf16 linear: unsupported policy");

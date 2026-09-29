@@ -2,9 +2,7 @@
 
 #include "ops/common/math.cuh"
 #include "ops/common/warp.cuh"
-#include "ops/linear/q4/q4_rowsplit_storage.cuh"
-#include "ops/linear/q5/q5_rowsplit_storage.cuh"
-#include "ops/linear/q6/q6_rowsplit_storage.cuh"
+#include "ops/common/rowsplit_decode.cuh"
 #include "ops/sparse_moe/hybrid/hybrid_host_runtime.h"
 
 #include <cuda.h>
@@ -35,51 +33,10 @@ void check(CUresult status, const char* what) {
     }
 }
 
-// Device view of a row-split matrix.
-struct Planes {
-    const std::uint8_t* codes;
-    const std::uint8_t* high;
-    const std::uint8_t* scales;
-    int qtype; // QType value
-    int groups_per_row;
-};
+using detail::load_eight;
+using Planes = detail::RowPlanes;
 
-Planes planes(const Weight& w) {
-    const int group = w.qtype == QType::Q8_G32_FP16 ? 32 : 64;
-    return {static_cast<const std::uint8_t*>(w.qdata), static_cast<const std::uint8_t*>(w.qhigh),
-            static_cast<const std::uint8_t*>(w.scales), static_cast<int>(w.qtype),
-            (w.k + 127) / 128 * 128 / group};
-}
-
-// Eight consecutive stored weights starting at logical column k0 (k0 % 8 == 0), exactly decoded.
-__device__ __forceinline__ void load_eight(const Planes& p, std::int64_t row, int k0,
-                                           float (&w)[8]) {
-    using namespace ninfer::ops::detail;
-    if (p.qtype == static_cast<int>(QType::Q8_G32_FP16)) {
-        const std::int64_t gi = row * p.groups_per_row + (k0 >> 5);
-        const float scale =
-            __half2float(__ushort_as_half(*reinterpret_cast<const std::uint16_t*>(p.scales + gi * 2)));
-        const uint2 bytes = *reinterpret_cast<const uint2*>(p.codes + gi * 32 + (k0 & 31));
-#pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            w[i]     = static_cast<float>(static_cast<std::int8_t>(bytes.x >> (8 * i))) * scale;
-            w[i + 4] = static_cast<float>(static_cast<std::int8_t>(bytes.y >> (8 * i))) * scale;
-        }
-        return;
-    }
-    const std::int64_t gi    = row * p.groups_per_row + (k0 >> 6);
-    const int chunk          = (k0 & 63) >> 3;
-    const std::uint32_t word = *reinterpret_cast<const std::uint32_t*>(p.codes + gi * 32 + chunk * 4);
-    const auto scale         = *reinterpret_cast<const std::uint16_t*>(p.scales + gi * 2);
-    if (p.qtype == static_cast<int>(QType::Q4_G64_FP16)) {
-        Q4SimtDecodeAtom::decode_eight(word, scale, w);
-    } else if (p.qtype == static_cast<int>(QType::Q5_G64_FP16)) {
-        Q5SimtDecodeAtom::decode_eight(word, p.high[gi * 8 + chunk], scale, w);
-    } else {
-        Q6SimtDecodeAtom::decode_eight(
-            word, *reinterpret_cast<const std::uint16_t*>(p.high + gi * 16 + chunk * 2), scale, w);
-    }
-}
+Planes planes(const Weight& w) { return detail::row_planes(w); }
 
 // Warp dot product of one stored row with a BF16 vector of length k (k % 8 == 0).
 __device__ __forceinline__ float warp_dot_bf16(const Planes& p, std::int64_t row,

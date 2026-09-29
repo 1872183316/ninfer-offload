@@ -9,6 +9,8 @@
 namespace ninfer::ops::detail {
 
 Q8Launch select_q8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t);
+// True when (n,k) has a tuned registered schedule.
+[[nodiscard]] bool q8_shape_registered(std::int32_t n, std::int32_t k) noexcept;
 Q8Launch select_q8_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy);
 
 void q8_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,

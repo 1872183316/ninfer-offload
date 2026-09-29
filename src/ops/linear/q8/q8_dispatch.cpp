@@ -40,6 +40,13 @@ Q8Launch select_q8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
     throw std::invalid_argument("q8 linear: unsupported shape");
 }
 
+bool q8_shape_registered(std::int32_t n, std::int32_t k) noexcept {
+    for (const auto& entry : kShapes) {
+        if (entry.n == n && entry.k == k) return true;
+    }
+    return false;
+}
+
 Q8Launch select_q8_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy) {
     if (!valid_linear_policy(policy)) throw std::invalid_argument("q8 linear: unsupported policy");
     return select_q8_a16_launch(n, k, t);
