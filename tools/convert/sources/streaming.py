@@ -55,6 +55,7 @@ class StreamingSafetensorsSource(SafetensorsSource):
         self._error: BaseException | None = None
         self._stop = False
         self._single_pass: set[Path] = set()
+        self._waiting: set[Path] = set()   # shards the converter is blocked on
         self.downloaded_bytes = 0
 
     # -- planning --------------------------------------------------------------------------
@@ -92,6 +93,9 @@ class StreamingSafetensorsSource(SafetensorsSource):
         return sum(self._remote[p] for p in self._ready | self._fetching)
 
     def _next(self) -> Path | None:
+        for path in self._waiting:
+            if path not in self._ready and path not in self._fetching:
+                return path
         for path in self._order:
             if path in self._ready or path in self._fetching or path in self._deleted:
                 continue
@@ -109,10 +113,10 @@ class StreamingSafetensorsSource(SafetensorsSource):
                     path = self._next()
                     if path is None:
                         return
-                    # The first needed shard may always proceed; later ones respect the budget.
-                    first = all(p in self._ready or p in self._fetching or p in self._deleted
-                                for p in self._order[: self._order.index(path)])
-                    if first or self._held_bytes() + self._remote[path] <= self.budget:
+                    # Only a shard the converter is blocked on may exceed the budget; prefetching
+                    # past it would otherwise grow without bound while earlier shards stay held.
+                    if (path in self._waiting
+                            or self._held_bytes() + self._remote[path] <= self.budget):
                         self._fetching.add(path)
                         break
                     self._lock.wait(timeout=5)
@@ -193,12 +197,17 @@ class StreamingSafetensorsSource(SafetensorsSource):
 
     def _file(self, path: Path) -> int:
         with self._lock:
-            while path not in self._ready:
-                if self._error:
-                    raise self._error
-                if path in self._deleted:
-                    raise RuntimeError(f"{path.name} was released before a later read")
-                self._lock.wait(timeout=5)
+            self._waiting.add(path)
+            self._lock.notify_all()
+            try:
+                while path not in self._ready:
+                    if self._error:
+                        raise self._error
+                    if path in self._deleted:
+                        raise RuntimeError(f"{path.name} was released before a later read")
+                    self._lock.wait(timeout=5)
+            finally:
+                self._waiting.discard(path)
             # A single-pass shard earlier in this job's order is complete once a later one opens.
             # Before planning (recipe preparation) nothing is released.
             if path in self._last_job:

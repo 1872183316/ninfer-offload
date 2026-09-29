@@ -95,6 +95,17 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
                 top_k  = std::max(top_k, h->top_k);
             }
         }
+        const execution::PleParameters* ple = nullptr;
+        for (const auto& layer : parameters.text.layers) {
+            if (layer.ple) { ple = &*layer.ple; }
+        }
+        const auto* ple_config = parameters.model.config().text.ple ? &*parameters.model.config().text.ple
+                                                                    : nullptr;
+        if (ple_config) {
+            // The PLE gather reuses the MoE mailbox: one id per n-gram head, one embedding row.
+            top_k  = std::max(top_k, static_cast<std::int32_t>(ple_config->heads()));
+            hidden = std::max(hidden, static_cast<std::int32_t>(ple_config->embed_dim));
+        }
         if (hidden) {
             const auto& offload = parameters.model.options().moe_offload;
             const auto threads  = offload.host_threads
@@ -111,6 +122,11 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
                         throw std::logic_error("offloaded MoE layer order differs from parameters");
                     }
                 }
+            }
+            if (ple) {
+                host_moe->set_ple_table(ple->table, static_cast<std::int32_t>(ple_config->heads()),
+                                        static_cast<std::int32_t>(ple_config->head_dim),
+                                        static_cast<std::int32_t>(ple_config->table_packing));
             }
         }
     }
