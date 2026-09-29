@@ -13,6 +13,8 @@ from .official_recipes import RECIPES
 from .pipeline import convert
 from .proposal import DEFAULT_RANKING, add_official_proposal
 from .qwen3_5 import build_model
+from .sources.streaming import StreamingSafetensorsSource
+from . import qwen4exp
 from .recipe import Recipe
 from .sources.safetensors import SafetensorsSource
 
@@ -129,6 +131,11 @@ def main(argv=None):
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--rows-per-chunk", type=int, default=512)
     parser.add_argument("--max-file-bytes", type=int, default=32_000_000_000)
+    parser.add_argument(
+        "--stream-url",
+        help="fetch --model shards on demand from this base URL (needs shard_headers.json)",
+    )
+    parser.add_argument("--stream-budget-gb", type=float, default=20.0)
     args = parser.parse_args(argv)
     components = tuple(args.components.split(","))
     if len(components) != len(set(components)):
@@ -138,12 +145,20 @@ def main(argv=None):
         raise ValueError("select the base source with --model")
     overrides = _pairs(args.resource, "resource")
     with ExitStack() as stack:
-        base = stack.enter_context(SafetensorsSource(args.model))
+        if args.stream_url:
+            base = stack.enter_context(
+                StreamingSafetensorsSource(
+                    args.model, args.stream_url, int(args.stream_budget_gb * 1e9)
+                )
+            )
+        else:
+            base = stack.enter_context(SafetensorsSource(args.model))
         sources = SourceInputs(base, paths, stack)
         companions = {
             key: sources[key] for key in ("dflash", "dflash2") if key in components
         }
-        model = build_model(
+        builder = qwen4exp.build_model if qwen4exp.is_qwen4exp(base.config) else build_model
+        model = builder(
             base,
             components=components,
             companions=companions,
@@ -156,7 +171,20 @@ def main(argv=None):
         if args.override:
             _function(args.override)(model, recipe, sources)
 
+        if args.stream_url:
+            jobs = recipe.prepare(device=args.device, rows_per_chunk=args.rows_per_chunk).weights
+            plan = [
+                base.files_of([model.parameters[name].source.label for name in job.parameters])
+                for job in jobs
+            ]
+            base.mark_single_pass(
+                [f for files in plan if len(files) > 4 for f in files]
+            )
+            base.plan(plan)
+
         def progress(index, total, job):
+            if args.stream_url:
+                base.begin_job(index)
             label = job.parameters[0]
             if len(job.parameters) > 1:
                 label += f" (+{len(job.parameters)-1})"

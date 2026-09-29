@@ -174,10 +174,36 @@ def qwen3_8_27b_nvfp4(model, recipe, sources):
         )
 
 
+def qwen3_8_flash_next(model, recipe, sources):
+    """Qwen4-Exp: Q4 expert gate/up, Q5 expert down, Q5 n-gram table, Q8 other projections."""
+    if model.config.get("model_type") != "qwen4_exp_text":
+        raise ValueError("this official recipe requires Qwen4-Exp mathematics")
+    _assign(recipe, "text/token_embedding", Q8)
+    _assign(recipe, "text/output_head", Q6)
+    for name, parameter in model.parameters.items():
+        if name.endswith("/ple/table"):
+            _assign(recipe, name, Q5)
+            continue
+        if not name.startswith("text/") or not parameter.projection:
+            continue
+        if name in ("text/token_embedding", "text/output_head"):
+            continue
+        if name.endswith(
+            ("/gdn/a_projection", "/gdn/b_projection", "/moe/router", "/moe/shared_score")
+        ):
+            continue
+        if "/moe/experts/" in name:
+            format = Q5 if name.endswith("/down") else Q4
+        else:
+            format = Q8
+        _assign(recipe, name, format)
+
+
 RECIPES = {
     "qwen3_6_27b": qwen3_6_27b,
     "qwen3_6_27b_nvfp4": qwen3_6_27b_nvfp4,
     "qwen3_8_27b": qwen3_8_27b,
     "qwen3_8_27b_nvfp4": qwen3_8_27b_nvfp4,
     "qwen3_6_35b_a3b": qwen3_6_35b_a3b,
+    "qwen3_8_flash_next": qwen3_8_flash_next,
 }
