@@ -200,11 +200,14 @@ class StreamingSafetensorsSource(SafetensorsSource):
                     raise RuntimeError(f"{path.name} was released before a later read")
                 self._lock.wait(timeout=5)
             # A single-pass shard earlier in this job's order is complete once a later one opens.
-            position = self._order.index(path)
-            for other in list(self._ready):
-                if (other in self._single_pass and self._last_job.get(other, -1) == self._job
-                        and self._order.index(other) < position):
-                    self._release(other)
+            # Before planning (recipe preparation) nothing is released.
+            if path in self._last_job:
+                position = self._order.index(path)
+                for other in list(self._ready):
+                    if (other in self._single_pass and other in self._last_job
+                            and self._last_job[other] == self._job
+                            and self._order.index(other) < position):
+                        self._release(other)
             self._lock.notify_all()
         return super()._file(path)
 
