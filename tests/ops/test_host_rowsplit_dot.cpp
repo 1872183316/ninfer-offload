@@ -151,6 +151,7 @@ int main() {
             }
         }
     }
+    for (const QType q : qtypes) failures += check_decode(q, 24, 1280, 0xab1eU);
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;
 }
