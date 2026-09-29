@@ -314,11 +314,16 @@ def main() -> None:
     parser.add_argument("--text", required=True)
     parser.add_argument("--tokens", type=int, default=32)
     parser.add_argument("--generate", type=int, default=0)
+    parser.add_argument("--continuation", default="",
+                        help="space-separated token ids appended after the text (teacher forcing); "
+                             "reports whether each is the reference argmax")
     args = parser.parse_args()
     from tokenizers import Tokenizer
 
     tokenizer = Tokenizer.from_file(str(Path(args.tokenizer) / "tokenizer.json"))
-    ids = tokenizer.encode(Path(args.text).read_text()).ids[: args.tokens]
+    ids = tokenizer.encode(Path(args.text).read_text(), add_special_tokens=False).ids[: args.tokens]
+    prompt_tokens = len(ids)
+    ids += [int(t) for t in args.continuation.split()]
     torch.set_num_threads(12)
     model = Model(args.artifact)
     with torch.no_grad():
@@ -327,6 +332,16 @@ def main() -> None:
         nll = [-logp[t, ids[t + 1]].item() for t in range(len(ids) - 1)]
         print(json.dumps({"tokens": ids, "nll": nll, "mean_nll": sum(nll) / len(nll),
                           "top1": logits.argmax(-1).tolist()}))
+        if args.continuation:
+            agree = []
+            for t in range(prompt_tokens - 1, len(ids) - 1):
+                top = logp[t].topk(2)
+                agree.append({"pos": t + 1, "token": ids[t + 1], "ref_top1": int(top.indices[0]),
+                              "margin": float(top.values[0] - top.values[1]),
+                              "token_logp_gap": float(top.values[0] - logp[t, ids[t + 1]])})
+            print(json.dumps({"continuation_check": agree,
+                              "matches": sum(a["token"] == a["ref_top1"] for a in agree),
+                              "total": len(agree)}))
         seq = list(ids)
         for _ in range(args.generate):
             seq.append(int(model.forward(seq)[-1].argmax()))
