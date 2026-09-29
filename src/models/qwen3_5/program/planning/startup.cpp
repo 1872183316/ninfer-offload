@@ -801,8 +801,11 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         break;
     }
-    if (device.compute_capability() != 120) {
-        throw std::invalid_argument("Qwen3.5 family runtime requires compute capability 12.0");
+    // The build targets exactly one architecture; the device must match it.
+    if (device.compute_capability() != NINFER_TARGET_SM) {
+        throw std::invalid_argument("Qwen3.5 family runtime requires compute capability " +
+                                    std::to_string(NINFER_TARGET_SM / 10) + "." +
+                                    std::to_string(NINFER_TARGET_SM % 10));
     }
 }
 
