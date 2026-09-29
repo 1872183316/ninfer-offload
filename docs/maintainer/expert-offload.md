@@ -53,3 +53,46 @@ its output rows. Kernels require AVX2, FMA, F16C and BMI2, checked at startup.
 - `ninfer_hybrid_sparse_moe_test`: complete hybrid Op against an FP64 oracle, including all-host,
   all-resident, mixed residency and top-10 geometry.
 - `ninfer_host_moe_bench`: host throughput at real bank sizes with a DRAM read reference.
+
+## Qwen3.8-Flash-Next (Qwen4-Exp)
+
+`Architecture::Qwen4Exp` (`qwen4_exp_text`) extends the Qwen3.5 family:
+
+- **Hyper-connection residual.** The residual is four BF16 streams `[4H,T]`. Each attention/GDN and
+  MoE block reads a gated mix of the normalized streams and adds its output back to every stream
+  with a per-stream injection weight (`ops::hc_*`, `include/ninfer/ops/hyper_connection.h`). The
+  head mixer replaces the final RMSNorm. Mixers therefore read their input directly and write to a
+  separate `[H,T]` output (`src/models/qwen3_5/execution/qwen4exp.cpp`).
+- **Attention.** 24 query / 2 KV heads of dimension 256 (causal geometry `CausalD256H24Kv2`,
+  group 12: small-T tiles hold at most four tokens). The QSA indexer selects every visible token
+  while at most 2051 tokens are visible, so Programs cap `max_context` at 2051 and run dense
+  causal attention; longer contexts need QSA token selection, which is not implemented.
+- **GatedDeltaNet** uses the 16K/48V-head geometry with a sigmoid output gate
+  (`ops::gated_rmsnorm_sigmoid`).
+- **PLE n-gram injection** (layer 1). The GPU hashes each token with its two-token history into 16
+  table rows (`ops::ple_ngram_rows`); the host runtime gathers them from the host-mapped Q5 table
+  (`Residency::HostMapped`, ~35 GB, never uploaded) through the MoE mailbox (`ops::ple_gather`);
+  the GPU then applies the key/value projections, the stream gate and the dilated convolution
+  (`ops::ple_gate`, `ops::ple_dilated_conv_silu`). The convolution and token history live in one
+  extra pseudo layer of the Linear Attention state pool, so checkpoints and slot copies include it.
+- Qwen4-Exp requires `--moe-offload`; MTP and other speculative backends are not implemented.
+
+Conversion streams the BF16 checkpoint from ModelScope shard by shard (disk use bounded by
+`--stream-budget-gb` plus the output):
+
+```bash
+python -m tools.convert --model <dir with config/tokenizer/shard_headers.json> \
+  --recipe qwen3_8_flash_next --out qwen3_8_flash_next.ninfer --device cuda \
+  --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
+  --stream-budget-gb 80 --max-file-bytes 250000000000
+```
+
+The recipe stores routed gate/up as Q4, routed down and the PLE table as Q5, the output head as Q6,
+other projections as Q8, and the router, shared-expert score and GDN a/b controls as BF16
+(108 GB total).
+
+`tools/validate/qwen4exp_reference.py` is an independent FP32 forward pass over the artifact's
+stored weights (exact decode of codes and scales) following the reference transformers model. On
+a 59-token English paragraph `ninfer-perplexity --moe-offload --kv-dtype bf16` gives mean NLL
+1.44330 against the reference's 1.44474; a 16-token greedy continuation matches the reference
+argmax at 15 positions, the exception being a near tie (reference margin 0.29 nats).
