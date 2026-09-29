@@ -148,7 +148,7 @@ def main(argv=None):
         if args.stream_url:
             base = stack.enter_context(
                 StreamingSafetensorsSource(
-                    args.model, args.stream_url, int(args.stream_budget_gb * 1e9)
+                    args.model, args.stream_url, int(args.stream_budget_gb * 1e9), parallel=6
                 )
             )
         else:
