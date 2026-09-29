@@ -166,9 +166,30 @@ class StreamingSafetensorsSource(SafetensorsSource):
         # value that reaches an artifact is read from the complete shard during production.
         info = self.describe(name)
         count = (end if end is not None else prod(info.shape)) - begin
-        if count <= 1 and info.file not in self._ready:
-            return torch.zeros(max(count, 0), dtype=_DTYPES[info.dtype][0])
+        if info.file not in self._ready and info.file not in self._fetching:
+            dtype, word = _DTYPES[info.dtype]
+            if count <= 1:
+                return torch.zeros(max(count, 0), dtype=dtype)
+            if count * word <= self._remote_read_limit:
+                # Small tensors (norms, convolutions) of an unfetched shard: exact range read.
+                offset = info.offset + begin * word
+                request = urllib.request.Request(
+                    self.url + info.file.name,
+                    headers={"Range": f"bytes={offset}-{offset + count * word - 1}"},
+                )
+                for attempt in range(10):
+                    try:
+                        with urllib.request.urlopen(request, timeout=60) as response:
+                            raw = response.read()
+                        break
+                    except OSError:
+                        time.sleep(3 * (attempt + 1))
+                if len(raw) != count * word:
+                    raise OSError(f"{name}: short remote range read")
+                return torch.frombuffer(bytearray(raw), dtype=dtype)
         return super().read_flat(name, begin, end)
+
+    _remote_read_limit = 64 << 20
 
     def _file(self, path: Path) -> int:
         with self._lock:
