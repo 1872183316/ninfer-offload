@@ -11,6 +11,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <tuple>
@@ -121,6 +122,14 @@ std::span<const std::byte> MaterializedArtifact::host_bytes(ObjectHandle handle)
     return objects_[handle.index].host_data;
 }
 
+const WeightParent& MaterializedArtifact::device_row_replica(ObjectHandle handle,
+                                                             std::size_t index) const {
+    if (handle.index >= objects_.size() || index >= objects_[handle.index].row_replicas.size()) {
+        throw ArtifactError("object has no such device row replica");
+    }
+    return objects_[handle.index].row_replicas[index];
+}
+
 bool MaterializedArtifact::has_device(ObjectHandle handle) const noexcept {
     return handle.index < objects_.size() && objects_[handle.index].device.has_value();
 }
@@ -207,6 +216,52 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
                               checked_add(segment.file_offset, segment.bytes, "copy range"),
                               static_cast<std::byte*>(storage.data) + segment.destination_offset});
         }
+    }
+    for (const auto& replica : plan.device_row_replicas) {
+        auto& object = out.objects_.at(replica.object.index);
+        if (!object.host || !out.arena_) {
+            throw ArtifactError("device row replica requires a Host-resident parent");
+        }
+        const auto& parent = object.host->geometry;
+        std::uint64_t count = 0;
+        for (const auto& range : replica.rows) {
+            count = checked_add(count, range.count, "replica rows");
+        }
+        const std::array<std::uint64_t, 2> shape{count, parent.shape[1]};
+        const auto geometry = weight_geometry(parent.format, parent.layout, shape);
+        if (geometry.bytes != replica.bytes) {
+            throw ArtifactError("device row replica size differs from plan");
+        }
+        auto storage      = out.arena_->alloc_bytes(static_cast<std::size_t>(replica.bytes),
+                                                    static_cast<std::size_t>(replica.alignment));
+        const auto offset = static_cast<std::uint64_t>(static_cast<std::byte*>(storage.data) -
+                                                       static_cast<std::byte*>(out.arena_->base()));
+        if (offset != replica.offset) {
+            throw ArtifactError("device replica offset differs from materialization plan");
+        }
+        // Concatenate the selected row spans of each plane; padding stays zero (section 3.6).
+        std::vector<std::byte> payload(static_cast<std::size_t>(geometry.bytes), std::byte{0});
+        const std::byte* source = object.host_data.data();
+        std::uint64_t row       = 0;
+        for (const auto& range : replica.rows) {
+            const auto copy_plane = [&](std::uint64_t src_plane, std::uint64_t dst_plane,
+                                        std::uint64_t row_bytes) {
+                if (!row_bytes) return;
+                std::memcpy(payload.data() + dst_plane + row * row_bytes,
+                            source + src_plane + range.begin * row_bytes,
+                            static_cast<std::size_t>(range.count * row_bytes));
+            };
+            copy_plane(0, 0, parent.code_bytes_per_row);
+            copy_plane(parent.high_offset, geometry.high_offset, parent.high_bytes_per_row);
+            copy_plane(parent.scale_offset, geometry.scale_offset, parent.scale_bytes_per_row);
+            row += range.count;
+        }
+        check_cuda(cudaMemcpy(storage.data, payload.data(), payload.size(), cudaMemcpyHostToDevice),
+                   "upload device row replica");
+        object.row_replicas.push_back(
+            WeightParent{geometry, static_cast<const std::byte*>(storage.data), 0.0F});
+        out.stats_.replica_bytes =
+            checked_add(out.stats_.replica_bytes, replica.bytes, "replica bytes");
     }
     if (ranges.empty()) {
         phase.complete();

@@ -3,6 +3,7 @@
 #include "artifact/framing.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -83,6 +84,24 @@ void Binder::require_device(ObjectHandle object, std::uint64_t alignment) {
     auto& demand     = demands_.at(object.index);
     demand.device    = true;
     demand.alignment = std::max({demand.alignment, alignment, geometry.alignment});
+}
+
+std::size_t Binder::require_device_rows(ObjectHandle object, std::vector<RowRange> rows) {
+    const auto& geometry = reader_.geometry(object);
+    if (geometry.layout != QuantLayout::RowSplit || geometry.shape.size() != 2) {
+        throw ArtifactError("device row replica requires a rank-2 row_split parent");
+    }
+    if (rows.empty()) { throw ArtifactError("device row replica is empty"); }
+    for (const auto& range : rows) {
+        if (!range.count || range.begin > geometry.shape[0] ||
+            range.count > geometry.shape[0] - range.begin) {
+            throw ArtifactError("device row replica range exceeds its parent");
+        }
+    }
+    (void)host_object(object);
+    auto& demand = demands_.at(object.index);
+    demand.row_replicas.push_back(std::move(rows));
+    return demand.row_replicas.size() - 1;
 }
 
 std::span<const std::byte> Binder::host_object(ObjectHandle object) {
@@ -172,6 +191,24 @@ MaterializationPlan Binder::finish() && {
         }
         if (demand.host) {
             plan.host_objects.push_back({ObjectHandle{i}, std::move(demand.host_data)});
+        }
+    }
+    // Row replicas follow every whole device object so both keep plan-order offsets.
+    for (std::size_t i = 0; i < demands_.size(); ++i) {
+        for (auto& rows : demands_[i].row_replicas) {
+            const ObjectHandle handle{i};
+            const auto& parent  = reader_.geometry(handle);
+            std::uint64_t count = 0;
+            for (const auto& range : rows) {
+                count = checked_add(count, range.count, "replica rows");
+            }
+            const std::array<std::uint64_t, 2> shape{count, parent.shape[1]};
+            const auto geometry  = weight_geometry(parent.format, parent.layout, shape);
+            const auto alignment = std::max<std::uint64_t>(256, geometry.alignment);
+            const auto offset = align_up(plan.device_capacity_bytes, alignment, "replica offset");
+            plan.device_row_replicas.push_back(
+                {handle, std::move(rows), offset, geometry.bytes, alignment});
+            plan.device_capacity_bytes = checked_add(offset, geometry.bytes, "device capacity");
         }
     }
     return plan;

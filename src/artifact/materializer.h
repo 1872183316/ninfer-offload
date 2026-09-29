@@ -21,6 +21,21 @@ struct DevicePlacement {
     std::uint64_t alignment = 256;
 };
 
+struct RowRange {
+    std::uint64_t begin = 0;
+    std::uint64_t count = 0;
+};
+
+// A device copy of selected rows of a Host-resident row_split_k128_v1 parent, materialized as a
+// standalone row_split payload whose rows follow `rows` in order (storage-layouts section 3.7).
+struct DeviceRowReplica {
+    ObjectHandle object;
+    std::vector<RowRange> rows;
+    std::uint64_t offset    = 0;
+    std::uint64_t bytes     = 0;
+    std::uint64_t alignment = 256;
+};
+
 struct HostPlacement {
     ObjectHandle object;
     // Already-read resources move into final storage without invalidating their byte views.
@@ -35,6 +50,7 @@ struct MaterializationPlan {
     std::uint64_t owned_value_bytes     = 0;
     std::vector<DevicePlacement> device_objects;
     std::vector<HostPlacement> host_objects;
+    std::vector<DeviceRowReplica> device_row_replicas;
 };
 
 struct MaterializationStats {
@@ -63,6 +79,9 @@ public:
     [[nodiscard]] const WeightParent& host_parent(ObjectHandle handle) const;
     [[nodiscard]] std::span<const std::byte> host_bytes(ObjectHandle handle) const;
     [[nodiscard]] bool has_device(ObjectHandle handle) const noexcept;
+    // Replica `index` of `handle` in Binder::require_device_rows order.
+    [[nodiscard]] const WeightParent& device_row_replica(ObjectHandle handle,
+                                                         std::size_t index) const;
 
     [[nodiscard]] const MaterializationStats& stats() const noexcept { return stats_; }
 
@@ -74,6 +93,7 @@ private:
         std::optional<WeightParent> device;
         std::optional<WeightParent> host;
         std::vector<std::byte> host_data;
+        std::vector<WeightParent> row_replicas;
     };
 
     std::unique_ptr<DeviceArena> arena_;

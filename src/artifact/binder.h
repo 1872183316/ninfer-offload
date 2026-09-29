@@ -46,6 +46,9 @@ public:
     [[nodiscard]] const Reader& reader() const noexcept { return reader_; }
 
     void require_device(ObjectHandle object, std::uint64_t alignment = 256);
+    // Requests a device replica of selected rows of a Host-resident row-split object and returns
+    // its replica index for MaterializedArtifact::device_row_replica.
+    [[nodiscard]] std::size_t require_device_rows(ObjectHandle object, std::vector<RowRange> rows);
     [[nodiscard]] std::span<const std::byte> host_object(ObjectHandle object);
     [[nodiscard]] ObjectHandle resource(std::string_view component, std::string_view role);
     [[nodiscard]] HostValues values(const Binding& binding, std::optional<QType> format = {});
@@ -57,6 +60,7 @@ private:
         bool host               = false;
         std::uint64_t alignment = 256;
         std::vector<std::byte> host_data;
+        std::vector<std::vector<RowRange>> row_replicas;
     };
 
     const Reader& reader_;
