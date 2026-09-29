@@ -67,9 +67,9 @@ PackedWeight replica_rows(const PackedWeight& parent, const std::vector<std::int
     const std::size_t n  = rows.size();
     PackedWeight out     = parent;
     out.code_plane_bytes   = n * cb;
-    out.high_plane_offset  = align_up_size(n * cb, 256);
+    out.high_plane_offset  = detail::align_up_size(n * cb, 256);
     out.high_plane_bytes   = n * hb;
-    out.scale_plane_offset = out.high_plane_offset + align_up_size(n * hb, 256);
+    out.scale_plane_offset = out.high_plane_offset + detail::align_up_size(n * hb, 256);
     out.scale_plane_bytes  = n * sb;
     out.payload.assign(out.scale_plane_offset + n * sb, 0);
     for (std::size_t i = 0; i < n; ++i) {
