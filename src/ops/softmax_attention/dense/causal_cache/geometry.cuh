@@ -14,5 +14,7 @@ struct CausalAttentionGeometry : AttentionHeadMapping<QHeadsValue, KVHeadsValue>
 
 using CausalD256H24Kv4 = CausalAttentionGeometry<24, 4, 1>;
 using CausalD256H16Kv2 = CausalAttentionGeometry<16, 2, 2>;
+// Qwen4-Exp: 24 query heads share 2 KV heads (group 12, at most 4 tokens per small-T tile).
+using CausalD256H24Kv2 = CausalAttentionGeometry<24, 2, 2>;
 
 } // namespace ninfer::ops

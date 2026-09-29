@@ -97,7 +97,8 @@ void causal_attention_small_t_fp8_launch_for(const Tensor& q, CacheInput input,
                                              Tensor& partial_l, Tensor& out, cudaStream_t stream) {
     const auto logical_capacity = static_cast<std::int32_t>(envelope.max_visible_keys);
     const auto splits           = causal_attention_split_capacity(
-        Geometry::QHeads, invocation.width, cache.storage, envelope, invocation.batch_size);
+        Geometry::QHeads, Geometry::KVHeads, invocation.width, cache.storage, envelope,
+        invocation.batch_size);
 
     const auto launch_partial = [&]<int Tokens, bool MultiBatch, bool Masked>() {
         launch_fp8_partial<Geometry, Tokens, MultiBatch, Masked>(
@@ -133,19 +134,25 @@ void causal_attention_small_t_fp8_launch_for(const Tensor& q, CacheInput input,
         dispatch_metadata.template operator()<4>();
         break;
     case 5:
-        dispatch_metadata.template operator()<5>();
-        break;
+        if constexpr (5 * Geometry::GroupSize <= 48) {
+            dispatch_metadata.template operator()<5>();
+            break;
+        }
+        throw std::invalid_argument("unsupported query-row tile");
     case 6:
-        dispatch_metadata.template operator()<6>();
-        break;
+        if constexpr (6 * Geometry::GroupSize <= 48) {
+            dispatch_metadata.template operator()<6>();
+            break;
+        }
+        throw std::invalid_argument("unsupported query-row tile");
     case 7:
-        if constexpr (Geometry::QHeads == 24) {
+        if constexpr (7 * Geometry::GroupSize <= 48) {
             dispatch_metadata.template operator()<7>();
             break;
         }
         throw std::invalid_argument("unsupported query-row tile");
     case 8:
-        if constexpr (Geometry::QHeads == 24) {
+        if constexpr (8 * Geometry::GroupSize <= 48) {
             dispatch_metadata.template operator()<8>();
             break;
         }
@@ -189,6 +196,12 @@ void causal_attention_small_t_fp8_launch(
         .width         = width,
         .batch_size    = q.ne[3],
     };
+    if (q.ne[1] == 24 && cache.num_kv_heads == 2) {
+        causal_attention_small_t_fp8_launch_for<CausalD256H24Kv2>(
+            q, input, positions, scale, cache, invocation, envelope, partial_acc, partial_m,
+            partial_l, out, stream);
+        return;
+    }
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         causal_attention_small_t_fp8_launch_for<CausalD256H24Kv4>(
             q, input, positions, scale, cache, invocation, envelope, partial_acc, partial_m,
@@ -216,6 +229,12 @@ void causal_attention_cached_small_t_fp8_launch(const Tensor& q, const Tensor& p
         .batch_size    = 1,
     };
     PagedKVBatchLayerView batch_cache = single_row_paged_kv_batch_view(cache);
+    if (q.ne[1] == 24 && cache.num_kv_heads == 2) {
+        causal_attention_small_t_fp8_launch_for<CausalD256H24Kv2>(
+            q, input, positions, scale, batch_cache, invocation, envelope, partial_acc, partial_m,
+            partial_l, out, stream);
+        return;
+    }
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         causal_attention_small_t_fp8_launch_for<CausalD256H24Kv4>(
             q, input, positions, scale, batch_cache, invocation, envelope, partial_acc, partial_m,

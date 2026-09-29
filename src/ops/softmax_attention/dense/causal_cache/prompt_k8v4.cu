@@ -7,6 +7,7 @@
 #include "ops/softmax_attention/dense/causal_cache/prompt_k8v4.cuh"
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -41,6 +42,9 @@ void causal_attention_prompt_k8v4_attention_dispatch(const Tensor& q, const Tens
                                                      float scale, const CacheView& cache,
                                                      Metadata metadata, Tensor& out,
                                                      cudaStream_t stream) {
+    if (cache.num_kv_heads != CausalD256H24Kv4::KVHeads && q.ne[1] == 24) {
+        throw std::invalid_argument("prompt_k8v4: 24/2 head geometry is unsupported");
+    }
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         causal_attention_prompt_k8v4_attention_launch_for<CausalD256H24Kv4>(
             q, positions, scale, cache, metadata, out, stream);

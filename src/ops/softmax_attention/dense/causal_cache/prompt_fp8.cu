@@ -41,6 +41,11 @@ void causal_attention_prompt_fp8_attention_dispatch(const Tensor& q, const Tenso
                                                     float scale, const CacheView& cache,
                                                     Metadata metadata, Tensor& out,
                                                     cudaStream_t stream) {
+    if (q.ne[1] == 24 && cache.num_kv_heads == 2) {
+        causal_attention_prompt_fp8_attention_launch_for<CausalD256H24Kv2>(
+            q, positions, scale, cache, metadata, out, stream);
+        return;
+    }
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         causal_attention_prompt_fp8_attention_launch_for<CausalD256H24Kv4>(
             q, positions, scale, cache, metadata, out, stream);

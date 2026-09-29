@@ -94,7 +94,8 @@ void causal_attention_small_t_nvfp4_launch_for(
     Tensor& partial_l, Tensor& out, cudaStream_t stream) {
     const auto logical_capacity = static_cast<std::int32_t>(envelope.max_visible_keys);
     const auto splits           = causal_attention_split_capacity(
-        Geometry::QHeads, invocation.width, cache.storage, envelope, invocation.batch_size);
+        Geometry::QHeads, Geometry::KVHeads, invocation.width, cache.storage, envelope,
+        invocation.batch_size);
 
     const auto launch_partial = [&]<int Tokens, bool MultiBatch, bool Masked>() {
         launch_nvfp4_partial<Geometry, Tokens, MultiBatch, Masked>(
@@ -186,6 +187,9 @@ void causal_attention_small_t_nvfp4_launch(
         .width         = width,
         .batch_size    = q.ne[3],
     };
+    if (cache.num_kv_heads != CausalD256H24Kv4::KVHeads && q.ne[1] == 24) {
+        throw std::invalid_argument("small_t_nvfp4: 24/2 head geometry is unsupported");
+    }
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         causal_attention_small_t_nvfp4_launch_for<CausalD256H24Kv4>(
             q, input, positions, scale, cache, invocation, envelope, partial_acc, partial_m,
@@ -213,6 +217,9 @@ void causal_attention_cached_small_t_nvfp4_launch(const Tensor& q, const Tensor&
         .batch_size    = 1,
     };
     PagedKVBatchLayerView batch_cache = single_row_paged_kv_batch_view(cache);
+    if (cache.num_kv_heads != CausalD256H24Kv4::KVHeads && q.ne[1] == 24) {
+        throw std::invalid_argument("small_t_nvfp4: 24/2 head geometry is unsupported");
+    }
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         causal_attention_small_t_nvfp4_launch_for<CausalD256H24Kv4>(
             q, input, positions, scale, batch_cache, invocation, envelope, partial_acc, partial_m,

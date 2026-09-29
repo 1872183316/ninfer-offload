@@ -116,6 +116,9 @@ constexpr Geometry kGeometries[] = {
     {"d256-h16-kv2", 16, 2},
 };
 
+// Qwen4-Exp attention: group 12 is registered for BF16, INT8 and FP8 storage only.
+constexpr Geometry kGroup12Geometry{"d256-h24-kv2", 24, 2};
+
 ops::AttentionHeadGeometry op_geometry(const Geometry& geometry) {
     return {kHeadDim, geometry.q_heads, geometry.kv_heads};
 }
@@ -2314,6 +2317,29 @@ int run_fp8_cases() {
     return failures;
 }
 
+int run_group12_cases() {
+    const Geometry& geometry = kGroup12Geometry;
+    int failures             = run_geometry(geometry);
+    for (const KvCacheStorage storage :
+         {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256}) {
+        if (!ninfer::test::kv_storage_on_target(storage)) continue;
+        // Every small-T tile width, a chunked verify width and a batched decode round.
+        for (std::int32_t tokens = 1; tokens <= 5; ++tokens) {
+            failures += run_a1_case(geometry, storage,
+                                    {tokens, 61, 192, 900u + static_cast<std::uint32_t>(tokens)},
+                                    MappingPattern::Fragmented);
+        }
+        failures += run_a3_case(geometry, storage, {4, 2047, 2051, 910u}, MappingPattern::Offset);
+        failures += run_a1_case(geometry, storage, {9, 17, 26, 911u}, MappingPattern::Identity);
+        failures += run_batch_case(
+            geometry, storage,
+            {1, {0, 63, 127, 2048}, {1, 1, 1, 1}, {2, 0, 3, 1}, MappingPattern::Fragmented, 912u});
+        failures += run_batch_case(
+            geometry, storage, {4, {61, 127}, {4, 3}, {1, 0}, MappingPattern::Fragmented, 913u});
+    }
+    return failures;
+}
+
 int run_nvfp4_cases() {
     int failures = 0;
     for (const Geometry& geometry : kGeometries) {
@@ -2475,6 +2501,7 @@ int run_softmax_attention_causal_cache_tests() {
     failures += report_quantization_quality(KvCacheStorage::Fp8KeyNvfp4Value, 819u);
     for (const Geometry& geometry : kGeometries) { failures += run_geometry(geometry); }
     failures += run_fp8_cases();
+    failures += run_group12_cases();
     failures += run_batch_cases();
     failures += run_dflash2_cases();
     std::cout << (failures == 0 ? "PASS" : "FAIL")

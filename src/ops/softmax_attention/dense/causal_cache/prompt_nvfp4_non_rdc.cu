@@ -6,6 +6,7 @@
 #include "ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cuh"
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -36,6 +37,9 @@ void launch_for(const Tensor& q, const Tensor& positions, float scale, const Cac
 template <typename CacheView, typename Metadata>
 void dispatch(const Tensor& q, const Tensor& positions, float scale, const CacheView& cache,
               Metadata metadata, Tensor& out, cudaStream_t stream) {
+    if (cache.num_kv_heads != CausalD256H24Kv4::KVHeads && q.ne[1] == 24) {
+        throw std::invalid_argument("prompt_nvfp4_non_rdc: 24/2 head geometry is unsupported");
+    }
     if (q.ne[1] == CausalD256H24Kv4::QHeads) {
         launch_for<CausalD256H24Kv4>(q, positions, scale, cache, metadata, out, stream);
         return;
