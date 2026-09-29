@@ -96,6 +96,41 @@ int check(QType qtype, std::int32_t n, std::int32_t k, std::int32_t tokens, std:
     return failures;
 }
 
+// Exact decode of a column span: every value must equal the logical weight bit for bit (a stored
+// code times its binary16 scale is exact in FP32).
+int check_decode(QType qtype, std::int32_t n, std::int32_t k, std::uint32_t seed) {
+    PatternedWeightOptions options;
+    options.row_split_scale = RowSplitScalePattern::Small;
+    options.row_split_codes = RowSplitCodePattern::Hashed;
+    const PackedWeight packed = make_patterned_weight(qtype, n, k, seed, options);
+    std::vector<std::uint8_t> payload = packed.payload;
+    const Weight w                    = packed.device_weight(payload.data());
+    const auto m                      = ops::host::row_split_matrix(w);
+    int failures                      = 0;
+    // PLE table geometry: packed rows of 8 x 160 columns, spans crossing G64 group boundaries.
+    const std::int32_t span = 160;
+    std::vector<float> out(span);
+    for (std::int32_t row = 0; row < n; row += 3) {
+        for (std::int32_t column = 0; column + span <= k; column += span) {
+            ops::host::decode_row_range(m, row, column, span, out.data());
+            for (std::int32_t i = 0; i < span; ++i) {
+                const double ref = logical_weight_fp64(packed, row, column + i);
+                if (static_cast<double>(out[i]) != ref) {
+                    if (failures < 5) {
+                        std::printf("  FAIL decode %s row=%d col=%d got=%.9g ref=%.9g
+",
+                                    name(qtype), row, column + i, static_cast<double>(out[i]), ref);
+                    }
+                    ++failures;
+                }
+            }
+        }
+    }
+    std::printf("%s decode %s n=%d k=%d
+", failures ? "FAIL" : "ok  ", name(qtype), n, k);
+    return failures;
+}
+
 } // namespace
 
 int main() {
