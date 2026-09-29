@@ -99,7 +99,50 @@ public:
         });
     }
 
+    HyperParameters hyper(const HyperWeights& w) const {
+        HyperParameters out{tensor(w.norm), linear(w.down), linear(w.up), std::nullopt};
+        if (w.inject) { out.inject = linear(*w.inject); }
+        return out;
+    }
+
+    BlockParameters qwen4exp_block(const BlockWeights& w) const {
+        BlockParameters out;
+        out.attn_hc = hyper(*w.attn_hc);
+        out.ffn_hc  = hyper(*w.ffn_hc);
+        out.ffn     = ffn(w);
+        if (w.ple) {
+            const auto& p = *w.ple;
+            out.ple = PleParameters{linear(p.key),          linear(p.value),
+                                    tensor(p.norm_key),     tensor(p.norm_query),
+                                    tensor(p.norm_conv),    tensor(p.convolution),
+                                    native_weight(model_.weight(p.table).view)};
+        }
+        if (const auto* a = std::get_if<AttentionWeights>(&w.mixer)) {
+            out.mixer = Qwen4AttentionParameters{
+                linear(a->query),     linear(a->key),       linear(a->gate), linear(a->value),
+                linear(a->output),    tensor(a->query_norm), tensor(a->key_norm)};
+        } else {
+            const auto& g = std::get<GdnWeights>(w.mixer);
+            const std::array qkv{model_.input(g.query), model_.input(g.key), model_.input(g.value)};
+            out.mixer = Qwen4GdnParameters{
+                with_context(model_.weight(g.query).name,
+                             [&] { return ops::prepare_linear_weight(qkv); }),
+                linear(g.z),
+                linear(g.a_projection),
+                linear(g.b_projection),
+                linear(g.output),
+                tensor(g.a_log),
+                tensor(g.dt_bias),
+                tensor(g.convolution),
+                tensor(g.norm)};
+        }
+        return out;
+    }
+
     BlockParameters block(const BlockWeights& w) const {
+        if (model_.config().text.architecture == Architecture::Qwen4Exp) {
+            return qwen4exp_block(w);
+        }
         BlockParameters out;
         out.input_norm          = tensor(w.input_norm);
         out.post_attention_norm = tensor(w.post_attention_norm);
@@ -278,7 +321,11 @@ Parameters::Parameters(const Model& source) : model(source) {
     const auto& w        = model.weights();
     text.token_embedding = native_weight(model.weight(w.text.token_embedding).view);
     text.output_head     = prepare.linear(w.text.output_head_use);
-    text.final_norm      = prepare.tensor(w.text.final_norm);
+    if (w.text.head_hc) {
+        text.head_hc = with_context("text/head_hc", [&] { return prepare.hyper(*w.text.head_hc); });
+    } else {
+        text.final_norm = prepare.tensor(w.text.final_norm);
+    }
     text.layers.reserve(w.text.layers.size());
     for (std::size_t i = 0; i < w.text.layers.size(); ++i) {
         text.layers.push_back(with_context("text/layers/" + std::to_string(i),

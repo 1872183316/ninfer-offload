@@ -48,6 +48,8 @@ struct HybridSparseMoeWeights {
 
 inline constexpr std::int32_t kHybridMoeMaxExperts = 512;
 inline constexpr std::int32_t kHybridMoeMaxTopK    = 16;
+// Mailbox layer word of a PLE table gather request.
+inline constexpr std::uint32_t kHybridPleRequest   = 0xffffffffU;
 
 class HybridMoeHostRuntime;
 
@@ -69,6 +71,11 @@ public:
     // Registers a layer's host banks; returns the index stored in HybridSparseMoeWeights::layer.
     std::int32_t add_layer(const HybridSparseMoeWeights& weights);
 
+    // Registers the Qwen4-Exp n-gram table served by ple_gather. `table` is a host-addressable
+    // row-split matrix [rows / packing, packing * head_dim].
+    void set_ple_table(const Weight& table, std::int32_t heads, std::int32_t head_dim,
+                       std::int32_t packing);
+
     // Optional routing statistics: counts[layer][expert] of selections observed by the host.
     [[nodiscard]] std::vector<std::vector<std::uint64_t>> routing_counts() const;
 
@@ -85,5 +92,15 @@ private:
 void hybrid_sparse_moe(const Tensor& x, const HybridSparseMoeWeights& weights,
                        HybridMoeHostRuntime& runtime, Tensor& destination,
                        WorkspaceArena& workspace, cudaStream_t stream);
+
+/**
+ * Gathers Qwen4-Exp n-gram embedding rows from the host table registered with set_ple_table.
+ * rows I32 [heads,T] holds logical table rows; out BF16 [heads*head_dim,T] receives
+ *   out[j*head_dim + d, t] = table_row(rows[j,t])[d]
+ * as the exact stored value rounded once to BF16. Rows outside the table read as zero. The
+ * handoff uses the same mapped mailbox as hybrid_sparse_moe and is CUDA Graph capturable.
+ */
+void ple_gather(const Tensor& rows, HybridMoeHostRuntime& runtime, Tensor& out,
+                cudaStream_t stream);
 
 } // namespace ninfer::ops

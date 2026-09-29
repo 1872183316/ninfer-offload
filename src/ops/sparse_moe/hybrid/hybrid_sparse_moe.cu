@@ -374,4 +374,48 @@ void hybrid_sparse_moe(const Tensor& x, const HybridSparseMoeWeights& w,
     check(cudaGetLastError(), "combine launch");
 }
 
+namespace {
+
+__global__ void publish_rows_kernel(const int* rows, int* mailbox, int n) {
+    const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < n) mailbox[i] = rows[i];
+}
+
+__global__ void ple_rows_to_bf16_kernel(const float* source, __nv_bfloat16* out, std::int64_t n) {
+    const std::int64_t i = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = __float2bfloat16_rn(source[i]);
+}
+
+} // namespace
+
+void ple_gather(const Tensor& rows, HybridMoeHostRuntime& runtime, Tensor& out,
+                cudaStream_t stream) {
+    auto& host = runtime.impl();
+    if (!host.ple) throw std::logic_error("ple_gather: no PLE table registered");
+    const auto& p = *host.ple;
+    const int T   = rows.ne[1];
+    if (rows.dtype != DType::I32 || rows.ne[0] != p.heads || !rows.is_contiguous() ||
+        out.dtype != DType::BF16 || out.ne[0] != p.heads * p.head_dim || out.ne[1] != T ||
+        !out.is_contiguous() || T <= 0 || rows.ne[2] != 1 || rows.ne[3] != 1) {
+        throw std::invalid_argument("ple_gather: invalid geometry");
+    }
+    if (T > host.max_tokens) throw std::invalid_argument("ple_gather: too many tokens");
+    const auto mailbox = host.device_mailbox();
+    const int n        = p.heads * T;
+    publish_rows_kernel<<<(n + 255) / 256, 256, 0, stream>>>(static_cast<const int*>(rows.data),
+                                                             mailbox.ids, n);
+    check(cudaGetLastError(), "PLE rows launch");
+    check(cuStreamWriteValue32(stream, mailbox.layer_word, kHybridPleRequest, 0), "publish PLE");
+    check(cuStreamWriteValue32(stream, mailbox.tokens_word, static_cast<cuuint32_t>(T), 0),
+          "publish PLE tokens");
+    check(cuStreamWriteValue32(stream, mailbox.request_word, 1, 0), "publish PLE request");
+    check(cuStreamWaitValue32(stream, mailbox.done_word, 1, CU_STREAM_WAIT_VALUE_EQ),
+          "wait for PLE rows");
+    check(cuStreamWriteValue32(stream, mailbox.done_word, 0, 0), "reset PLE completion");
+    const std::int64_t count = static_cast<std::int64_t>(T) * p.heads * p.head_dim;
+    ple_rows_to_bf16_kernel<<<static_cast<unsigned>((count + 255) / 256), 256, 0, stream>>>(
+        mailbox.out, static_cast<__nv_bfloat16*>(out.data), count);
+    check(cudaGetLastError(), "PLE convert launch");
+}
+
 } // namespace ninfer::ops

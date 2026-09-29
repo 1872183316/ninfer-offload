@@ -46,6 +46,11 @@ void rows_dot(const RowSplitMatrix& m, std::int32_t row_begin, std::int32_t rows
               const float* prepared, std::int32_t prepared_stride, std::int32_t tokens,
               float* out, std::int32_t out_stride);
 
+// out[i] = W[row, column + i] for i in [0,count): exact decode of the stored codes times their
+// binary16 group scale.
+void decode_row_range(const RowSplitMatrix& m, std::int32_t row, std::int32_t column,
+                      std::int32_t count, float* out);
+
 // True when the running CPU supports the AVX2/FMA/F16C/BMI2 instructions the kernels require.
 [[nodiscard]] bool host_kernels_supported() noexcept;
 

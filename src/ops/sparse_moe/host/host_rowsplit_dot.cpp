@@ -255,6 +255,42 @@ void rows_dot(const RowSplitMatrix& m, std::int32_t row_begin, std::int32_t rows
     }
 }
 
+void decode_row_range(const RowSplitMatrix& m, std::int32_t row, std::int32_t column,
+                      std::int32_t count, float* out) {
+    if (row < 0 || row >= m.rows || column < 0 || count < 0 || column + count > m.k) {
+        throw std::invalid_argument("host row-split decode: invalid row or column span");
+    }
+    const Codec c = codec(m.qtype);
+    for (std::int32_t i = 0; i < count; ++i) {
+        const std::int32_t k      = column + i;
+        const std::int64_t group  = static_cast<std::int64_t>(row) * m.groups_per_row + k / c.group;
+        const std::int32_t lane   = k % c.group;
+        const std::uint8_t* codes = m.codes + group * c.code_bytes;
+        std::int32_t value;
+        if (m.qtype == QType::Q8_G32_FP16) {
+            value = static_cast<std::int8_t>(codes[lane]);
+        } else {
+            // Byte j holds lane 2j in its low nibble and lane 2j+1 in its high nibble.
+            std::uint32_t word = (codes[lane >> 1] >> ((lane & 1) * 4)) & 0xfU;
+            std::int32_t bits  = 4;
+            if (c.high_bytes != 0) {
+                const std::uint8_t* high = m.high + group * c.high_bytes;
+                if (m.qtype == QType::Q5_G64_FP16) {
+                    word |= ((high[lane >> 3] >> (lane & 7)) & 1U) << 4;
+                    bits = 5;
+                } else {
+                    const std::int32_t bit = 2 * lane;
+                    word |= ((high[bit >> 3] >> (bit & 7)) & 3U) << 4;
+                    bits = 6;
+                }
+            }
+            const std::uint32_t sign = 1U << (bits - 1);
+            value = static_cast<std::int32_t>(word ^ sign) - static_cast<std::int32_t>(sign);
+        }
+        out[i] = static_cast<float>(value) * _cvtsh_ss(m.scales[group]);
+    }
+}
+
 bool host_kernels_supported() noexcept {
     __builtin_cpu_init();
     return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") &&

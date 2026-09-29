@@ -43,17 +43,45 @@ struct GdnParameters {
     LinearParameters output;
 };
 
+// Qwen4-Exp mixers read the hyper-connection input directly (no residual norm) and write their
+// block output to a separate BF16 [H,T] tensor. Every projection is an independent linear.
+struct Qwen4AttentionParameters {
+    LinearParameters query, key, gate, value, output;
+    Tensor query_norm, key_norm;
+};
+
+struct Qwen4GdnParameters {
+    LinearParameters qkv, z, a, b, output; // qkv rows are query | key | value
+    Tensor a_log, dt_bias, convolution, norm;
+};
+
+struct HyperParameters {
+    Tensor norm;
+    LinearParameters down, up;
+    std::optional<LinearParameters> inject;
+};
+
+struct PleParameters {
+    LinearParameters key, value;
+    Tensor norm_key, norm_query, norm_conv, convolution;
+    Weight table; // host-mapped; gathered by the host runtime
+};
+
 struct BlockParameters {
     Tensor input_norm, post_attention_norm;
-    std::variant<AttentionParameters, GdnParameters> mixer;
+    std::variant<AttentionParameters, GdnParameters, Qwen4AttentionParameters, Qwen4GdnParameters>
+        mixer;
     FfnParameters ffn;
     ops::SparseMoeHints projection_prefetch;
+    std::optional<HyperParameters> attn_hc, ffn_hc;
+    std::optional<PleParameters> ple;
 };
 
 struct TextParameters {
     Weight token_embedding;
     LinearParameters output_head;
-    Tensor final_norm;
+    Tensor final_norm;                      // Qwen3.5 only
+    std::optional<HyperParameters> head_hc; // Qwen4-Exp only
     std::vector<BlockParameters> layers;
 };
 

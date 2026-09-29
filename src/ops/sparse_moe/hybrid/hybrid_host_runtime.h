@@ -7,6 +7,7 @@
 #include <cuda_bf16.h>
 
 #include <atomic>
+#include <optional>
 #include <cstdint>
 #include <thread>
 #include <vector>
@@ -40,6 +41,18 @@ struct HybridMoeHostRuntime::Impl {
     };
 
     void serve();
+    void gather_ple(std::int32_t tokens);
+
+    // Qwen4-Exp n-gram table: logical row r is packed row r / packing, columns
+    // [(r % packing) * head_dim, +head_dim).
+    struct PleTable {
+        host::RowSplitMatrix table;
+        std::int32_t heads    = 0;
+        std::int32_t head_dim = 0;
+        std::int32_t packing  = 0;
+        std::int64_t rows     = 0;
+    };
+    std::optional<PleTable> ple;
 
     std::int32_t max_tokens = 0;
     std::int32_t max_hidden = 0;

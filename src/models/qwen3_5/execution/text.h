@@ -162,6 +162,22 @@ private:
     }
 
     void attn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase);
+    // Q/K RMSNorm, RoPE, cached causal attention and the sigmoid output gate for head views
+    // [head_dim, heads, T]; returns the gated attention [head_dim, q_heads, T].
+    [[nodiscard]] Tensor attention_core(const Tensor& query_norm, const Tensor& key_norm, Tensor& q,
+                                        Tensor& gate, Tensor& k, Tensor& v, int index);
+    // Qwen4-Exp hyper-connection execution of every Text layer and the head mixer; x is the
+    // token embedding [H,T] on entry and the final hidden [H,T] on return.
+    void qwen4exp_layers(Tensor& x, Phase phase);
+    void hyper_mix(const HyperParameters& weights, const Tensor& wide, Tensor& input,
+                   Tensor* injection);
+    void qwen4exp_attention(const Qwen4AttentionParameters& weights, const Tensor& h, Tensor& y,
+                            int index);
+    void qwen4exp_gdn(const Qwen4GdnParameters& weights, const Tensor& h, Tensor& y, int index,
+                      Phase phase);
+    void qwen4exp_ple(const PleParameters& weights, Tensor& wide, Phase phase);
+    // Final hidden of the Text stack: RMSNorm for Qwen3.5, the mixed head stream for Qwen4-Exp.
+    void final_hidden(const Tensor& x, Tensor& out);
     void gdn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase);
     void mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,
                   const ops::SparseMoeHints& hints);
@@ -229,6 +245,7 @@ private:
     const Tensor* active_linear_state_source_slots_                                = nullptr;
     const Tensor* active_linear_state_destination_slots_                           = nullptr;
     const Tensor* active_valid_columns_                                            = nullptr;
+    const Tensor* active_ids_                                                      = nullptr;
     const Tensor* active_backend_kv_table_rows_                                    = nullptr;
     const ops::CausalAttentionExecutionEnvelope* active_causal_attention_envelope_ = nullptr;
     std::int32_t active_sequence_batch_                                            = 0;

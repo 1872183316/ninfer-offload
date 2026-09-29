@@ -699,12 +699,13 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
                                                        &linear_state_destination_slots);
         ScopedValue<std::int32_t> batch_binding(active_sequence_batch_, batch);
         ScopedValue<std::int32_t> width_binding(active_sequence_width_, 1);
+        ScopedValue<const Tensor*> ids_binding(active_ids_, &ids);
 
         Tensor x = work_.alloc(DType::BF16, {dimension(config_.hidden_size), batch});
         ops::embedding(ids, *embed_, x, stream);
         NullTap tap;
         run_layers(x, Phase::Verify, tap);
-        ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, hidden, stream);
+        final_hidden(x, hidden);
         project(hidden, *lm_head_, logits, work_, stream);
     }
     work_.reset();
@@ -755,6 +756,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
 
         Tensor x        = work_.alloc(DType::BF16, {dimension(config_.hidden_size), columns});
         Tensor flat_ids = ids.view({columns});
+        ScopedValue<const Tensor*> ids_binding(active_ids_, &flat_ids);
         ops::embedding(flat_ids, *embed_, x, stream);
         if constexpr (Tap::enabled) { tap.begin(x); }
         run_layers(x, Phase::Verify, tap);
@@ -764,7 +766,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
         Tensor flat_hidden = hidden.view({dimension(config_.hidden_size), columns});
         Tensor flat_logits = logits.view({dimension(config_.vocab_size), columns});
         Tensor flat_tokens = target_tokens.view({columns});
-        ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, flat_hidden, stream);
+        final_hidden(x, flat_hidden);
         project(flat_hidden, *lm_head_, flat_logits, work_, stream);
         ops::argmax(flat_logits, flat_tokens,
                     dimension(parameters_.model.resources().public_token_count), stream);
@@ -838,40 +840,21 @@ void TextContext::mtp_propose_batch(const Tensor& hidden, Tensor& logits, Tensor
     proposal_argmax(hidden, logits, draft_tokens);
 }
 
-void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase ph) {
-    const auto& p  = std::get<AttentionParameters>(w.mixer);
+Tensor TextContext::attention_core(const Tensor& query_norm, const Tensor& key_norm, Tensor& q,
+                                   Tensor& gate, Tensor& k, Tensor& v, int fidx) {
     cudaStream_t s = ctx_.stream;
-    const int T    = x.ne[1];
+    const int T    = q.ne[2];
     if (active_causal_attention_envelope_ == nullptr) {
         throw std::logic_error("Text GQA execution envelope is not set");
     }
-
-    const auto projection = workspace::text_attention_projection(work_, config_, T);
-    Tensor h              = projection.hidden;
-    ops::rmsnorm(x, w.input_norm, config_.rms_norm_eps, true, h, s);
-
-    Tensor q         = projection.query.view({dimension(config_.attention->head_dim),
-                                              dimension(config_.attention->num_attention_heads), T});
-    Tensor gate      = projection.gate.view({dimension(config_.attention->head_dim),
-                                             dimension(config_.attention->num_attention_heads), T});
-    Tensor k         = projection.key.view({dimension(config_.attention->head_dim),
-                                            dimension(config_.attention->num_key_value_heads), T});
-    Tensor v         = projection.value.view({dimension(config_.attention->head_dim),
-                                              dimension(config_.attention->num_key_value_heads), T});
-    Tensor q_flat    = q.view({dimension(config_.attention->query_width()), T});
-    Tensor gate_flat = gate.view({dimension(config_.attention->query_width()), T});
-    Tensor k_flat    = k.view({dimension(config_.attention->key_width()), T});
-    Tensor v_flat    = v.view({dimension(config_.attention->key_width()), T});
-    attention_projection(h, p, q_flat, gate_flat, k_flat, v_flat, work_, s);
-
     const auto results = workspace::text_attention_results(work_, config_, T);
     Tensor qn =
         results.normalized_query.view({dimension(config_.attention->head_dim),
                                        dimension(config_.attention->num_attention_heads), T});
     Tensor kn = results.normalized_key.view({dimension(config_.attention->head_dim),
                                              dimension(config_.attention->num_key_value_heads), T});
-    ops::rmsnorm(q, p.query_norm, config_.rms_norm_eps, true, qn, s);
-    ops::rmsnorm(k, p.key_norm, config_.rms_norm_eps, true, kn, s);
+    ops::rmsnorm(q, query_norm, config_.rms_norm_eps, true, qn, s);
+    ops::rmsnorm(k, key_norm, config_.rms_norm_eps, true, kn, s);
     const Tensor& cache_positions =
         active_cache_positions_ != nullptr ? *active_cache_positions_ : io_.pos;
     const Tensor& rope_positions =
@@ -921,6 +904,36 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
             s);
     }
     ops::sigmoid_mul(gate, a, s);
+    return a;
+}
+
+void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase ph) {
+    const auto& p  = std::get<AttentionParameters>(w.mixer);
+    cudaStream_t s = ctx_.stream;
+    const int T    = x.ne[1];
+    if (active_causal_attention_envelope_ == nullptr) {
+        throw std::logic_error("Text GQA execution envelope is not set");
+    }
+
+    const auto projection = workspace::text_attention_projection(work_, config_, T);
+    Tensor h              = projection.hidden;
+    ops::rmsnorm(x, w.input_norm, config_.rms_norm_eps, true, h, s);
+
+    Tensor q         = projection.query.view({dimension(config_.attention->head_dim),
+                                              dimension(config_.attention->num_attention_heads), T});
+    Tensor gate      = projection.gate.view({dimension(config_.attention->head_dim),
+                                             dimension(config_.attention->num_attention_heads), T});
+    Tensor k         = projection.key.view({dimension(config_.attention->head_dim),
+                                            dimension(config_.attention->num_key_value_heads), T});
+    Tensor v         = projection.value.view({dimension(config_.attention->head_dim),
+                                              dimension(config_.attention->num_key_value_heads), T});
+    Tensor q_flat    = q.view({dimension(config_.attention->query_width()), T});
+    Tensor gate_flat = gate.view({dimension(config_.attention->query_width()), T});
+    Tensor k_flat    = k.view({dimension(config_.attention->key_width()), T});
+    Tensor v_flat    = v.view({dimension(config_.attention->key_width()), T});
+    attention_projection(h, p, q_flat, gate_flat, k_flat, v_flat, work_, s);
+
+    Tensor a = attention_core(p.query_norm, p.key_norm, q, gate, k, v, fidx);
 
     ops::linear_add(a.view({dimension(config_.attention->query_width()), T}), p.output.weight, x,
                     p.output.policy, work_, s);
@@ -1077,6 +1090,13 @@ void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase,
 
 template <class Tap>
 void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
+    if (config_.hyper) {
+        if constexpr (Tap::enabled) {
+            throw std::logic_error("Qwen4-Exp does not publish per-layer target features");
+        }
+        qwen4exp_layers(x, ph);
+        return;
+    }
     const bool prefill = ph == Phase::Prefill;
     for (std::size_t layer = 0; layer < parameters_.text.layers.size(); ++layer) {
         const auto& block  = parameters_.text.layers[layer];
@@ -1115,6 +1135,21 @@ void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
                                      " columns=" + std::to_string(x.ne[1]) + ": " + error.what());
         }
     }
+}
+
+void TextContext::final_hidden(const Tensor& x, Tensor& out) {
+    if (config_.hyper) {
+        // The head mixer already produced the final hidden in x.
+        if (x.bytes() != out.bytes() || !x.is_contiguous() || !out.is_contiguous()) {
+            throw std::logic_error("Qwen4-Exp final hidden shape mismatch");
+        }
+        if (x.data != out.data) {
+            CUDA_CHECK(cudaMemcpyAsync(out.data, x.data, x.bytes(), cudaMemcpyDeviceToDevice,
+                                       ctx_.stream));
+        }
+        return;
+    }
+    ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, out, ctx_.stream);
 }
 
 void TextContext::run_layers(Tensor& x, Phase ph) {
@@ -1247,6 +1282,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             ScopedEnvelope scoped_envelope(active_causal_attention_envelope_, chunk_envelope);
 
             Tensor x = roots.residual;
+            ScopedValue<const Tensor*> ids_binding(active_ids_, &ids_device);
             ops::embedding(ids_device, *embed_, x, s);
             if (!local_scatter_indices.empty()) {
                 Tensor indices_device = roots.scatter_indices;
@@ -1264,7 +1300,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             Tensor xf = prefill_hidden_.data != nullptr
                             ? matrix_window(prefill_hidden_, len)
                             : work_.alloc(DType::BF16, {dimension(config_.hidden_size), len});
-            ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, xf, s);
+            final_hidden(x, xf);
 
             if (is_last) {
                 Tensor last_xf = xf.slice(1, len - 1, 1);

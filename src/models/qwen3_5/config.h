@@ -135,6 +135,15 @@ struct TextConfig {
     std::optional<IndexerConfig> indexer;
     std::optional<PleConfig> ple;
     bool gdn_sigmoid_gate = false;
+
+    // Linear Attention state layers: every GDN layer, plus one pseudo layer whose recurrent slot
+    // stores the Qwen4-Exp PLE state (convolution history, then the n-gram token history).
+    [[nodiscard]] std::uint32_t linear_state_layers() const noexcept {
+        return linear_attention_layers + (ple ? 1U : 0U);
+    }
+    [[nodiscard]] std::uint64_t ple_conv_state_bytes() const noexcept {
+        return ple ? std::uint64_t(ple->history()) * hyper->count * hidden_size * 2 : 0;
+    }
 };
 
 struct VisionConfig {

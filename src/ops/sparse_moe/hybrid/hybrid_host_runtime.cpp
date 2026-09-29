@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <immintrin.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -108,6 +109,13 @@ void HybridMoeHostRuntime::Impl::serve() {
         idle_polls        = 0;
         sleeping          = false;
         *request          = 0;
+        if (*layer == kHybridPleRequest) {
+            gather_ple(static_cast<std::int32_t>(*tokens));
+            _mm_sfence();
+            *done        = 1U;
+            last_request = clock::now();
+            continue;
+        }
         const auto L      = static_cast<std::size_t>(*layer);
         const auto T      = static_cast<std::int32_t>(*tokens);
         auto& state       = layers.at(L);
@@ -125,6 +133,39 @@ void HybridMoeHostRuntime::Impl::serve() {
         *done        = 1U;
         last_request = clock::now();
     }
+}
+
+void HybridMoeHostRuntime::Impl::gather_ple(std::int32_t T) {
+    const auto& p        = *ple;
+    const std::int64_t n = static_cast<std::int64_t>(T) * p.heads;
+    const std::int64_t width = static_cast<std::int64_t>(p.heads) * p.head_dim;
+    // Row j of token t lands at out[t * width + (j % heads) * head_dim].
+    pool.parallel_for(static_cast<std::int32_t>(n), [&](std::int32_t i) {
+        const std::int64_t row = ids[i];
+        float* dst = out + (i / p.heads) * width + static_cast<std::int64_t>(i % p.heads) * p.head_dim;
+        if (row < 0 || row >= p.rows) {
+            std::fill(dst, dst + p.head_dim, 0.0F);
+            return;
+        }
+        host::decode_row_range(p.table, static_cast<std::int32_t>(row / p.packing),
+                               static_cast<std::int32_t>(row % p.packing) * p.head_dim, p.head_dim,
+                               dst);
+    });
+}
+
+void HybridMoeHostRuntime::set_ple_table(const Weight& table, std::int32_t heads,
+                                         std::int32_t head_dim, std::int32_t packing) {
+    if (heads <= 0 || head_dim <= 0 || packing <= 0 || heads > impl_->max_top_k ||
+        heads * head_dim > impl_->max_hidden || table.k != packing * head_dim) {
+        throw std::invalid_argument("hybrid host runtime: PLE table exceeds mailbox geometry");
+    }
+    Impl::PleTable p;
+    p.table    = host::row_split_matrix(table);
+    p.heads    = heads;
+    p.head_dim = head_dim;
+    p.packing  = packing;
+    p.rows     = static_cast<std::int64_t>(table.n) * packing;
+    impl_->ple = p;
 }
 
 HybridMoeHostRuntime::HybridMoeHostRuntime(std::int32_t threads, std::int32_t max_tokens,
