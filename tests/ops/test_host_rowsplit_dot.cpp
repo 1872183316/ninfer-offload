@@ -117,8 +117,7 @@ int check_decode(QType qtype, std::int32_t n, std::int32_t k, std::uint32_t seed
                 const double ref = logical_weight_fp64(packed, row, column + i);
                 if (static_cast<double>(out[i]) != ref) {
                     if (failures < 5) {
-                        std::printf("  FAIL decode %s row=%d col=%d got=%.9g ref=%.9g
-",
+                        std::printf("  FAIL decode %s row=%d col=%d got=%.9g ref=%.9g\n",
                                     name(qtype), row, column + i, static_cast<double>(out[i]), ref);
                     }
                     ++failures;
@@ -126,8 +125,7 @@ int check_decode(QType qtype, std::int32_t n, std::int32_t k, std::uint32_t seed
             }
         }
     }
-    std::printf("%s decode %s n=%d k=%d
-", failures ? "FAIL" : "ok  ", name(qtype), n, k);
+    std::printf("%s decode %s n=%d k=%d\n", failures ? "FAIL" : "ok  ", name(qtype), n, k);
     return failures;
 }
 
