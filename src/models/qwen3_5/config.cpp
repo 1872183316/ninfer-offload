@@ -101,12 +101,13 @@ RopeConfig rope(const Json& value, std::uint32_t head_dim) {
 
 TextConfig text(const Json& value, bool mtp);
 
-std::vector<std::uint64_t> u64_array(const Json& value, std::string_view label) {
+std::vector<std::uint64_t> u64_array(const Json& value, std::string_view label,
+                                     bool positive = true) {
     if (!value.is_array() || value.empty()) {
         throw ArtifactError(std::string(label) + " must be a nonempty array");
     }
     std::vector<std::uint64_t> out;
-    for (const auto& item : value) out.push_back(artifact::require_u64(item, label, true));
+    for (const auto& item : value) out.push_back(artifact::require_u64(item, label, positive));
     return out;
 }
 
@@ -160,13 +161,18 @@ TextConfig qwen4exp_text(const Json& value) {
     ple.rows             = artifact::require_u64(p.at("rows"), "ple.rows", true);
     ple.multipliers      = u64_array(p.at("multipliers"), "ple.multipliers");
     ple.head_vocab_sizes = u64_array(p.at("head_vocab_sizes"), "ple.head_vocab_sizes");
-    ple.head_offsets     = u64_array(p.at("head_offsets"), "ple.head_offsets");
+    ple.head_offsets     = u64_array(p.at("head_offsets"), "ple.head_offsets", false);
     if (ple.ngram_size < 2 || ple.multipliers.size() != ple.ngram_size ||
         ple.head_vocab_sizes.size() != ple.heads() || ple.head_offsets.size() != ple.heads() ||
         ple.embed_dim != ple.heads() * ple.head_dim || ple.rows % ple.table_packing ||
         ple.layer >= out.num_hidden_layers ||
         out.layer_types[ple.layer] != MixerKind::LinearAttention) {
         throw ArtifactError("inconsistent Qwen4-Exp PLE config");
+    }
+    for (std::size_t j = 0; j < ple.head_offsets.size(); ++j) {
+        if (ple.head_offsets[j] + ple.head_vocab_sizes[j] > ple.rows) {
+            throw ArtifactError("Qwen4-Exp PLE head rows exceed the table");
+        }
     }
     out.ple = std::move(ple);
     return out;
