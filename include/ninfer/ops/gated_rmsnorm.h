@@ -23,4 +23,9 @@ namespace ninfer::ops {
 void gated_rmsnorm(const Tensor& x, const Tensor& weight, const Tensor& z, float eps, Tensor& out,
                    cudaStream_t stream);
 
+// Same contract with a sigmoid gate: ideal[d,r] = x[d,r] * inv_r * weight[d] * sigmoid(z[d,r]).
+// Qwen4-Exp Gated DeltaNet output normalization.
+void gated_rmsnorm_sigmoid(const Tensor& x, const Tensor& weight, const Tensor& z, float eps,
+                           Tensor& out, cudaStream_t stream);
+
 } // namespace ninfer::ops

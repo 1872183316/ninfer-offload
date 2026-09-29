@@ -65,14 +65,34 @@ struct MoeWeights {
     std::optional<MoeOffloadWeights> offload;
 };
 
+// Qwen4-Exp gated residual: grouped norm [hc*H], low-rank mixer, optional block injection.
+struct HyperWeights {
+    WeightId norm, down, up;
+    std::optional<WeightId> inject;
+};
+
+struct IndexerWeights {
+    WeightId query_key, query_norm, key_norm;
+};
+
+struct PleWeights {
+    WeightId key, value, norm_key, norm_query, norm_conv, convolution, table;
+};
+
 struct BlockWeights {
+    // Qwen3.5 residual norms; Qwen4-Exp uses the hyper-connection mixers instead.
     WeightId input_norm, post_attention_norm;
     std::variant<AttentionWeights, GdnWeights> mixer;
     std::variant<DenseWeights, MoeWeights> ffn;
+    std::optional<HyperWeights> attn_hc, ffn_hc;
+    std::optional<IndexerWeights> indexer;
+    std::optional<PleWeights> ple;
 };
 
 struct TextWeights {
+    // final_norm is Qwen3.5 only; Qwen4-Exp mixes the streams with head_hc before the head.
     WeightId token_embedding, output_head, final_norm;
+    std::optional<HyperWeights> head_hc;
     WeightUseId output_head_use;
     std::vector<BlockWeights> layers;
 };

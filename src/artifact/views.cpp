@@ -11,6 +11,7 @@ WeightView bind_view(const ParameterReference& reference,
     out.shape             = reference.shape;
     std::uint64_t covered = 0;
     for (const auto& part : reference.binding.parts) {
+        // Host and HostMapped parents both resolve to the object's host backing.
         const auto& parent = reference.residency == Residency::Device
                                  ? materialized.device_parent(part.object)
                                  : materialized.host_parent(part.object);

@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace ninfer::artifact {
@@ -51,6 +52,7 @@ struct MaterializationPlan {
     std::vector<DevicePlacement> device_objects;
     std::vector<HostPlacement> host_objects;
     std::vector<DeviceRowReplica> device_row_replicas;
+    std::vector<ObjectHandle> mapped_objects;
 };
 
 struct MaterializationStats {
@@ -64,6 +66,7 @@ struct MaterializationStats {
     std::size_t device_object_count     = 0;
     std::size_t host_object_count       = 0;
     std::uint64_t replica_bytes         = 0; // Device row replicas of Host parents.
+    std::uint64_t mapped_bytes          = 0; // Read-only file mappings.
     double upload_seconds               = 0;
 };
 
@@ -97,7 +100,20 @@ private:
         std::vector<WeightParent> row_replicas;
     };
 
+    struct Mapping {
+        void* base         = nullptr;
+        std::size_t length = 0;
+        Mapping() = default;
+        Mapping(void* b, std::size_t l) : base(b), length(l) {}
+        Mapping(Mapping&& other) noexcept
+            : base(std::exchange(other.base, nullptr)), length(std::exchange(other.length, 0)) {}
+        Mapping& operator=(Mapping&&) = delete;
+        Mapping(const Mapping&)       = delete;
+        ~Mapping();
+    };
+
     std::unique_ptr<DeviceArena> arena_;
+    std::vector<Mapping> mappings_;
     std::vector<ObjectStorage> objects_;
     MaterializationStats stats_;
 };

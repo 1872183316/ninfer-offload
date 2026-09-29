@@ -59,6 +59,8 @@ ParameterReference Binder::binding(std::string name, const Binding& binding, Sha
             require_device(part.object);
         } else if (residency == Residency::Host) {
             (void)host_object(part.object);
+        } else if (residency == Residency::HostMapped) {
+            require_mapped(part.object);
         }
     }
     return {std::move(name), std::move(shape), binding, residency};
@@ -102,6 +104,15 @@ std::size_t Binder::require_device_rows(ObjectHandle object, std::vector<RowRang
     auto& demand = demands_.at(object.index);
     demand.row_replicas.push_back(std::move(rows));
     return demand.row_replicas.size() - 1;
+}
+
+void Binder::require_mapped(ObjectHandle object) {
+    reader_.validate_object(object);
+    auto& demand = demands_.at(object.index);
+    if (demand.host || demand.device || !demand.row_replicas.empty()) {
+        throw ArtifactError("a mapped object cannot also have other residencies");
+    }
+    demand.mapped = true;
 }
 
 std::span<const std::byte> Binder::host_object(ObjectHandle object) {
@@ -192,6 +203,7 @@ MaterializationPlan Binder::finish() && {
         if (demand.host) {
             plan.host_objects.push_back({ObjectHandle{i}, std::move(demand.host_data)});
         }
+        if (demand.mapped) { plan.mapped_objects.push_back(ObjectHandle{i}); }
     }
     // Row replicas follow every whole device object so both keep plan-order offsets.
     for (std::size_t i = 0; i < demands_.size(); ++i) {

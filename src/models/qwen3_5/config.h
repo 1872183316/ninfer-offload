@@ -70,6 +70,50 @@ struct MoeConfig {
     std::uint32_t shared_expert_intermediate_size = 0;
 };
 
+// Qwen4-Exp hyper-connections: `count` residual streams of hidden_size, low-rank input mixer.
+struct HyperConnectionConfig {
+    std::uint32_t count    = 0;
+    std::uint32_t low_rank = 0;
+};
+
+// Qwen4-Exp QSA token indexer on full-attention layers.
+struct IndexerConfig {
+    std::uint32_t heads          = 0;
+    std::uint32_t head_dim       = 0;
+    std::uint32_t budget         = 0;
+    std::uint32_t compress_ratio = 0;
+
+    // Every visible token is selected while the visible count stays within this bound, which makes
+    // QSA identical to dense causal attention.
+    [[nodiscard]] std::uint64_t dense_visible_limit() const noexcept {
+        return std::uint64_t(budget) + compress_ratio - 1;
+    }
+};
+
+// Qwen4-Exp Per-Layer Embedding: hashed n-gram rows injected into every residual stream.
+struct PleConfig {
+    std::uint32_t layer           = 0; // zero-based Text layer index
+    std::uint32_t ngram_size      = 0;
+    std::uint32_t heads_per_ngram = 0;
+    std::uint32_t head_dim        = 0;
+    std::uint32_t embed_dim       = 0;
+    std::uint32_t conv_kernel     = 0;
+    std::uint32_t eos_token_id    = 0;
+    std::uint32_t table_packing   = 0; // embedding rows per stored table row
+    std::uint64_t rows            = 0;
+    std::vector<std::uint64_t> multipliers;
+    std::vector<std::uint64_t> head_vocab_sizes;
+    std::vector<std::uint64_t> head_offsets;
+
+    [[nodiscard]] std::uint32_t heads() const noexcept {
+        return (ngram_size - 1) * heads_per_ngram;
+    }
+    // Dilated depthwise convolution history: (kernel - 1) * dilation, dilation = ngram_size.
+    [[nodiscard]] std::uint32_t history() const noexcept {
+        return (conv_kernel - 1) * ngram_size;
+    }
+};
+
 struct TextConfig {
     Architecture architecture             = Architecture::Qwen3_5;
     std::uint32_t hidden_size             = 0;
@@ -86,6 +130,11 @@ struct TextConfig {
     std::optional<RopeConfig> rope_parameters;
     std::optional<GdnConfig> gdn;
     std::variant<DenseConfig, MoeConfig> ffn;
+    // Qwen4-Exp only.
+    std::optional<HyperConnectionConfig> hyper;
+    std::optional<IndexerConfig> indexer;
+    std::optional<PleConfig> ple;
+    bool gdn_sigmoid_gate = false;
 };
 
 struct VisionConfig {

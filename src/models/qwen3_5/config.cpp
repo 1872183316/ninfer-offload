@@ -99,7 +99,84 @@ RopeConfig rope(const Json& value, std::uint32_t head_dim) {
     return out;
 }
 
+TextConfig text(const Json& value, bool mtp);
+
+std::vector<std::uint64_t> u64_array(const Json& value, std::string_view label) {
+    if (!value.is_array() || value.empty()) {
+        throw ArtifactError(std::string(label) + " must be a nonempty array");
+    }
+    std::vector<std::uint64_t> out;
+    for (const auto& item : value) out.push_back(artifact::require_u64(item, label, true));
+    return out;
+}
+
+TextConfig qwen4exp_text(const Json& value) {
+    require_members(
+        value,
+        {"architectures", "model_type", "hidden_size", "vocab_size", "num_hidden_layers",
+         "max_position_embeddings", "tie_word_embeddings", "rms_norm_eps", "layer_types",
+         "num_attention_heads", "num_key_value_heads", "head_dim", "rope_parameters",
+         "linear_num_key_heads", "linear_key_head_dim", "linear_num_value_heads",
+         "linear_value_head_dim", "linear_conv_kernel_dim", "num_experts", "num_experts_per_tok",
+         "moe_intermediate_size", "shared_expert_intermediate_size", "hc_count", "hc_lowrank",
+         "indexer_n_heads", "indexer_head_dim", "indexer_budget", "indexer_compress_ratio",
+         "output_gate_type", "ple"},
+        {}, "Qwen4-Exp text config");
+    Json base = value;
+    for (const auto* key : {"hc_count", "hc_lowrank", "indexer_n_heads", "indexer_head_dim",
+                            "indexer_budget", "indexer_compress_ratio", "output_gate_type",
+                            "ple"}) {
+        base.erase(key);
+    }
+    base["architectures"] = Json::array({"Qwen3_5MoeForCausalLM"});
+    base["model_type"]    = "qwen3_5_moe_text";
+    TextConfig out        = text(base, false);
+    out.architecture      = Architecture::Qwen4Exp;
+    out.hyper   = HyperConnectionConfig{dimension(value, "hc_count"), dimension(value, "hc_lowrank")};
+    out.indexer = IndexerConfig{dimension(value, "indexer_n_heads"),
+                                dimension(value, "indexer_head_dim"),
+                                dimension(value, "indexer_budget"),
+                                dimension(value, "indexer_compress_ratio")};
+    const auto gate = artifact::require_id(value.at("output_gate_type"), "output_gate_type");
+    if (gate != "sigmoid" && gate != "silu") {
+        throw ArtifactError("unsupported linear-attention output gate");
+    }
+    out.gdn_sigmoid_gate = gate == "sigmoid";
+    const auto& p = value.at("ple");
+    require_members(p,
+                    {"layer", "ngram_size", "heads_per_ngram", "head_dim", "embed_dim",
+                     "conv_kernel", "eos_token_id", "multipliers", "head_vocab_sizes",
+                     "head_offsets", "rows", "table_packing"},
+                    {}, "Qwen4-Exp PLE config");
+    PleConfig ple;
+    ple.layer            = integer(p.at("layer"), "ple.layer", false);
+    ple.ngram_size       = dimension(p, "ngram_size");
+    ple.heads_per_ngram  = dimension(p, "heads_per_ngram");
+    ple.head_dim         = dimension(p, "head_dim");
+    ple.embed_dim        = dimension(p, "embed_dim");
+    ple.conv_kernel      = dimension(p, "conv_kernel");
+    ple.eos_token_id     = dimension(p, "eos_token_id");
+    ple.table_packing    = dimension(p, "table_packing");
+    ple.rows             = artifact::require_u64(p.at("rows"), "ple.rows", true);
+    ple.multipliers      = u64_array(p.at("multipliers"), "ple.multipliers");
+    ple.head_vocab_sizes = u64_array(p.at("head_vocab_sizes"), "ple.head_vocab_sizes");
+    ple.head_offsets     = u64_array(p.at("head_offsets"), "ple.head_offsets");
+    if (ple.ngram_size < 2 || ple.multipliers.size() != ple.ngram_size ||
+        ple.head_vocab_sizes.size() != ple.heads() || ple.head_offsets.size() != ple.heads() ||
+        ple.embed_dim != ple.heads() * ple.head_dim || ple.rows % ple.table_packing ||
+        ple.layer >= out.num_hidden_layers ||
+        out.layer_types[ple.layer] != MixerKind::LinearAttention) {
+        throw ArtifactError("inconsistent Qwen4-Exp PLE config");
+    }
+    out.ple = std::move(ple);
+    return out;
+}
+
 TextConfig text(const Json& value, bool mtp) {
+    if (value.contains("model_type") && value.at("model_type") == "qwen4_exp_text") {
+        if (mtp) { throw ArtifactError("Qwen4-Exp MTP is not implemented"); }
+        return qwen4exp_text(value);
+    }
     require_members(
         value,
         {"architectures", "model_type", "hidden_size", "vocab_size", "num_hidden_layers",

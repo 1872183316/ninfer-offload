@@ -5,6 +5,9 @@
 #include "core/startup.h"
 
 #include <cuda_runtime.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -130,6 +133,10 @@ const WeightParent& MaterializedArtifact::device_row_replica(ObjectHandle handle
     return objects_[handle.index].row_replicas[index];
 }
 
+MaterializedArtifact::Mapping::~Mapping() {
+    if (base) { (void)munmap(base, length); }
+}
+
 bool MaterializedArtifact::has_device(ObjectHandle handle) const noexcept {
     return handle.index < objects_.size() && objects_[handle.index].device.has_value();
 }
@@ -184,6 +191,33 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
                 read_divisor(reader, placement.object, geometry, storage.host_data, out.stats_);
             storage.host = WeightParent{geometry, storage.host_data.data(), divisor};
         }
+    }
+    for (const auto handle : plan.mapped_objects) {
+        reader.validate_object(handle);
+        auto& storage = out.objects_.at(handle.index);
+        if (storage.host) { throw ArtifactError("duplicate mapped placement"); }
+        const auto& geometry   = reader.geometry(handle);
+        const auto& descriptor = reader.directory().tensor(handle);
+        const auto segments    = reader.segments(descriptor.offset, descriptor.bytes);
+        if (segments.size() != 1) {
+            throw ArtifactError(descriptor.id + ": a mapped object must lie in one container file");
+        }
+        const auto page    = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
+        const auto begin   = segments[0].file_offset / page * page;
+        const auto delta   = segments[0].file_offset - begin;
+        const auto length  = static_cast<std::size_t>(delta + segments[0].bytes);
+        const auto path    = reader.file_path(segments[0].file_index);
+        const int fd       = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) { throw ArtifactError(path.string() + ": cannot open for mapping"); }
+        void* base = mmap(nullptr, length, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(begin));
+        ::close(fd);
+        if (base == MAP_FAILED) { throw ArtifactError(descriptor.id + ": mmap failed"); }
+        // Row lookups are sparse and random; read-ahead would only evict resident experts.
+        (void)madvise(base, length, MADV_RANDOM);
+        out.mappings_.emplace_back(base, length);
+        storage.host = WeightParent{geometry, static_cast<const std::byte*>(base) + delta, 0.0F};
+        out.stats_.mapped_bytes =
+            checked_add(out.stats_.mapped_bytes, segments[0].bytes, "mapped bytes");
     }
     std::vector<CopyRange> ranges;
     for (const auto& placement : plan.device_objects) {

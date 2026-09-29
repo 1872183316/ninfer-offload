@@ -169,6 +169,14 @@ std::vector<std::byte> Reader::read_object(ObjectHandle handle) const {
     return read_range(object_offset(object), object_bytes(object));
 }
 
+std::filesystem::path Reader::file_path(std::size_t file_index) const {
+    if (file_index >= impl_->directory.files.size()) {
+        throw ArtifactError("invalid continuation index");
+    }
+    if (file_index == 0) return impl_->entry;
+    return impl_->entry.parent_path() / *impl_->directory.files[file_index].path;
+}
+
 std::size_t Reader::read_direct(std::size_t file_index, std::uint64_t file_offset,
                                 std::span<std::byte> destination) const {
     return impl_->file(file_index).read_direct(file_offset, destination);

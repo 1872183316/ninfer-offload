@@ -139,6 +139,59 @@ MoeWeights bind_moe(Bindings& b, const TextConfig& config, const std::string& pr
 
 } // namespace
 
+HyperWeights bind_hyper(Bindings& b, const TextConfig& config, const std::string& p, bool inject) {
+    const auto h    = config.hidden_size;
+    const auto wide = std::uint64_t(config.hyper->count) * h;
+    const auto rank = config.hyper->low_rank;
+    HyperWeights out;
+    out.norm = b.direct(p + "norm", {wide});
+    out.down = b.parameter(p + "down", {rank, wide}, {p + "input"});
+    out.up   = b.parameter(p + "up", {wide, rank}, {p + "mix"});
+    if (inject) { out.inject = b.parameter(p + "inject", {config.hyper->count, wide}, {p + "input"}); }
+    return out;
+}
+
+BlockWeights bind_qwen4exp_block(Bindings& b, const TextConfig& config, const std::string& p,
+                                 MixerKind mixer, std::uint32_t layer,
+                                 const MoeOffloadOptions* offload,
+                                 const std::vector<std::int32_t>* resident) {
+    BlockWeights out;
+    out.attn_hc = bind_hyper(b, config, p + "attn_hc/", true);
+    out.ffn_hc  = bind_hyper(b, config, p + "ffn_hc/", true);
+    if (config.ple && config.ple->layer == layer) {
+        const auto& ple = *config.ple;
+        const auto h    = config.hidden_size;
+        const auto wide = std::uint64_t(config.hyper->count) * h;
+        PleWeights w;
+        w.key         = b.parameter(p + "ple/key", {wide, ple.embed_dim}, {p + "ple/embedding"});
+        w.value       = b.parameter(p + "ple/value", {h, ple.embed_dim}, {p + "ple/embedding"});
+        w.norm_key    = b.direct(p + "ple/norm_key", {wide});
+        w.norm_query  = b.direct(p + "ple/norm_query", {wide});
+        w.norm_conv   = b.direct(p + "ple/norm_conv", {wide});
+        w.convolution = b.direct(p + "ple/convolution", {ple.conv_kernel, wide});
+        // The n-gram table is only gathered row by row: map it instead of loading it.
+        w.table = b.parameter(p + "ple/table",
+                              {ple.rows / ple.table_packing,
+                               std::uint64_t(ple.table_packing) * ple.head_dim},
+                              {}, {}, artifact::Residency::HostMapped);
+        out.ple = w;
+    }
+    if (mixer == MixerKind::FullAttention) {
+        out.mixer = bind_attention(b, config, p);
+        const auto& ix = *config.indexer;
+        out.indexer    = IndexerWeights{
+            b.parameter(p + "indexer/query_key",
+                        {std::uint64_t(ix.heads + 1) * ix.head_dim, config.hidden_size},
+                        {p + "mixer_input"}),
+            b.direct(p + "indexer/query_norm", {ix.head_dim}),
+            b.direct(p + "indexer/key_norm", {ix.head_dim})};
+    } else {
+        out.mixer = bind_gdn(b, config, p);
+    }
+    out.ffn = bind_moe(b, config, p, offload, resident);
+    return out;
+}
+
 BlockWeights bind_block(Bindings& b, const TextConfig& config, const std::string& p,
                         MixerKind mixer, const MoeOffloadOptions* offload,
                         const std::vector<std::int32_t>* resident) {
@@ -215,15 +268,23 @@ TextWeights bind_text(Bindings& b, const TextConfig& config, const LoadOptions& 
     }
     out.output_head = b.parameter("text/output_head", {config.vocab_size, config.hidden_size},
                                   std::move(head_inputs));
-    out.final_norm  = b.direct("text/final_norm", {config.hidden_size});
+    const bool qwen4exp = config.architecture == Architecture::Qwen4Exp;
+    if (qwen4exp) {
+        out.head_hc = bind_hyper(b, config, "text/head_hc/", false);
+    } else {
+        out.final_norm = b.direct("text/final_norm", {config.hidden_size});
+    }
     out.layers.reserve(config.num_hidden_layers);
     const auto* offload = options.moe_offload.enabled ? &options.moe_offload : nullptr;
     const auto resident = offload ? resident_experts(*offload, config)
                                   : std::vector<std::vector<std::int32_t>>{};
     for (std::uint32_t i = 0; i < config.num_hidden_layers; ++i) {
-        out.layers.push_back(bind_block(b, config, "text/layers/" + std::to_string(i) + "/",
-                                        config.layer_types[i], offload,
-                                        offload ? &resident.at(i) : nullptr));
+        const auto prefix  = "text/layers/" + std::to_string(i) + "/";
+        const auto* chosen = offload ? &resident.at(i) : nullptr;
+        out.layers.push_back(qwen4exp ? bind_qwen4exp_block(b, config, prefix, config.layer_types[i],
+                                                            i, offload, chosen)
+                                      : bind_block(b, config, prefix, config.layer_types[i],
+                                                   offload, chosen));
     }
     return out;
 }
