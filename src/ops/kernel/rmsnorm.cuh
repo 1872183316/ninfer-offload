@@ -18,7 +18,7 @@ enum class RmsEpilogue {
     GatedSigmoid, // x * inv * w * sigmoid(z)
 };
 
-constexpr bool rms_gated(RmsEpilogue epilogue) {
+__host__ __device__ constexpr bool rms_gated(RmsEpilogue epilogue) {
     return epilogue == RmsEpilogue::Gated || epilogue == RmsEpilogue::GatedSigmoid;
 }
 
