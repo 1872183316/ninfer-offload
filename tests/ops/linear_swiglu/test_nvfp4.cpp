@@ -8,6 +8,7 @@
 #include <array>
 #include <exception>
 #include <iostream>
+#include "ops/target_support.h"
 
 namespace {
 int check_negative_gate() {
@@ -74,6 +75,10 @@ int check_negative_gate() {
 } // namespace
 
 int main() {
+    if (!ninfer::test::kTargetHasNvfp4) {
+        std::cout << "SKIP: NVFP4 requires an sm_120a build\n";
+        return 77;
+    }
     using namespace ninfer;
     using namespace ninfer::test::linear_swiglu;
 

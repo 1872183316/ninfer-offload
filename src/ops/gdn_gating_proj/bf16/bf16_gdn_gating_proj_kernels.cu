@@ -257,21 +257,23 @@ void require_shape35(const Weight& w, const char* name) {
     }
 }
 
-template <class Geometry, int SplitK>
-constexpr std::int32_t cooperative_resident_ctas_per_sm() noexcept {
+// Co-resident CTAs per SM for a cooperative split-K launch, queried from the running device's
+// register and shared-memory limits rather than assumed from one GPU generation.
+template <class Geometry, int SplitK, int Warps, bool NormalizeInput, int NormTokenCapacity>
+std::int32_t cooperative_resident_ctas_per_sm() {
     static_assert(SplitK > 1);
-    if constexpr (std::is_same_v<Geometry, Bf16Gdn27Geometry>) {
-        static_assert(SplitK == 8 || SplitK == 4 || SplitK == 2);
-        // Qualified on the sm_120a build: BN128 split-8 uses 256 threads and split-4/2 use
-        // 512 threads; registers and 40-KiB shared memory admit two resident CTAs per SM.
-        return 2;
-    } else {
-        static_assert(std::is_same_v<Geometry, Bf16Gdn35Geometry>);
-        static_assert(SplitK == 32 || SplitK == 16 || SplitK == 8 || SplitK == 4 || SplitK == 2);
-        // BN64 split-32 is register-limited to two resident CTAs per SM. The remaining
-        // specializations admit four. These are kernel facts, not a device-wide SM-count policy.
-        return SplitK == 32 ? 2 : 4;
-    }
+    constexpr auto kernel = bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, true, Warps,
+                                                                 NormalizeInput, NormTokenCapacity>;
+    constexpr int kSmemBytes = kBf16GdnSmemBytes<Geometry::kBlockN>;
+    static const std::int32_t resident = [] {
+        CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                        kSmemBytes));
+        int blocks = 0;
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, kernel, Warps * 32,
+                                                                 kSmemBytes));
+        return static_cast<std::int32_t>(blocks);
+    }();
+    return resident;
 }
 
 template <class Geometry, int SplitK, int Warps = kBf16GdnWarps, bool NormalizeInput = false,
@@ -357,8 +359,9 @@ bool launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
     } else {
         constexpr std::int64_t kCtasPerTokenTile =
             static_cast<std::int64_t>(Geometry::kHeads / kBf16GdnBlockM) * SplitK;
-        constexpr std::int32_t kResidentCtasPerSm =
-            cooperative_resident_ctas_per_sm<Geometry, SplitK>();
+        const std::int32_t kResidentCtasPerSm =
+            cooperative_resident_ctas_per_sm<Geometry, SplitK, Warps, NormalizeInput,
+                                             NormTokenCapacity>();
         const std::int64_t resident_ctas =
             static_cast<std::int64_t>(multiprocessor_count) * kResidentCtasPerSm;
         const std::int64_t max_token_tiles = resident_ctas / kCtasPerTokenTile;

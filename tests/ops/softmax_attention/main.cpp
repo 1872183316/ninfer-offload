@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string_view>
+#include "ops/target_support.h"
 
 int run_softmax_attention_causal_cache_tests();
 int run_softmax_attention_dflash2_tests();
@@ -12,9 +13,11 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--dflash2-only")
         return run_softmax_attention_dflash2_tests();
     if (argc == 2 && std::string_view(argv[1]) == "--nvfp4-only") {
+        if (!ninfer::test::kTargetHasNvfp4) return 77;
         return run_softmax_attention_nvfp4_tests();
     }
     if (argc == 2 && std::string_view(argv[1]) == "--k8v4-only") {
+        if (!ninfer::test::kTargetHasNvfp4) return 77;
         return run_softmax_attention_k8v4_tests();
     }
     if (argc != 1) {

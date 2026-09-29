@@ -11,6 +11,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include "ops/target_support.h"
 
 using namespace ninfer;
 using namespace ninfer::test;
@@ -423,7 +424,7 @@ int main() {
     int failures = 0;
     failures += run_q4_q5();
     failures += run_q8();
-    failures += run_nvfp4();
+    if (ninfer::test::kTargetHasNvfp4) failures += run_nvfp4();
     failures += run_fp8();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj\n";
     return failures == 0 ? 0 : 1;

@@ -70,12 +70,22 @@ int main() {
     const ServeOptions fp8 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "fp8"});
     failures += check(fp8.kv_cache == ninfer::KvCacheStorage::Fp8E4M3Row256,
                       "--kv-dtype fp8 did not select row-scaled E4M3 KV");
+#if NINFER_TARGET_SM >= 120
     const ServeOptions nvfp4 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "nvfp4"});
     failures += check(nvfp4.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16,
                       "--kv-dtype nvfp4 did not select group-16 NVFP4 KV");
     const ServeOptions k8v4 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "k8v4"});
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "--kv-dtype k8v4 did not select asymmetric K8V4 KV");
+#else
+    for (const char* kv : {"nvfp4", "k8v4"}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--kv-dtype", kv});
+        } catch (const std::exception&) { rejected = true; }
+        failures += check(rejected, "serve accepted an NVFP4 KV encoding on a non-sm_120a build");
+    }
+#endif
     const std::string kv_help = serve_usage_text("ninfer-serve");
     failures += check(kv_help.find("nvfp4") != std::string::npos &&
                           kv_help.find("k8v4") != std::string::npos,

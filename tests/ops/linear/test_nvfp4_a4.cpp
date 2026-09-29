@@ -3,6 +3,7 @@
 #include <vector>
 #include <exception>
 #include <iostream>
+#include "ops/target_support.h"
 
 namespace {
 
@@ -51,6 +52,10 @@ int run_nvfp4_a4() {
 } // namespace
 
 int main() {
+    if (!ninfer::test::kTargetHasNvfp4) {
+        std::cout << "SKIP: NVFP4 requires an sm_120a build\n";
+        return 77;
+    }
     if (!ninfer::test::linear::cuda_available()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;

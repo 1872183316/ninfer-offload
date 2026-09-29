@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "ops/target_support.h"
 
 using namespace ninfer;
 using namespace ninfer::test;
@@ -369,6 +370,7 @@ void encode_full_group(const std::vector<float>& source, std::size_t source_base
 }
 
 int full_append_case(int kv_heads, KvCacheStorage storage, int tokens = 3) {
+    if (!ninfer::test::kv_storage_on_target(storage)) return 0;
     const TestCacheLayout layout = test_cache_layout(storage);
     const int first_position     = tokens >= 128 ? 61 : 63;
     const int logical_pages      = (first_position + tokens + kPage - 1) / kPage;
@@ -1377,6 +1379,7 @@ int main(int argc, char** argv) {
 
     int failures = 0;
     if (nvfp4_only || k8v4_only) {
+        if (!ninfer::test::kTargetHasNvfp4) return 77;
         const KvCacheStorage storage =
             nvfp4_only ? KvCacheStorage::Nvfp4Group16 : KvCacheStorage::Fp8KeyNvfp4Value;
         for (const int kv_heads : {4, 2}) { failures += full_append_case(kv_heads, storage); }

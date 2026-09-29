@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "ops/target_support.h"
 
 using namespace ninfer;
 using namespace ninfer::test;
@@ -626,7 +627,7 @@ int run_weight_inputs() {
             }
         }
     }
-    failures += run_nvfp4_target();
+    if (ninfer::test::kTargetHasNvfp4) failures += run_nvfp4_target();
     failures += run_q8_dflash2();
     return failures;
 }
@@ -650,7 +651,7 @@ int main(int argc, char** argv) {
     if (!dflash2_only) {
         failures += run_q4_q5();
         failures += run_bf16_target();
-        failures += run_nvfp4_target();
+        if (ninfer::test::kTargetHasNvfp4) failures += run_nvfp4_target();
         failures += run_fp8_target();
         failures += run_q8_target();
         failures += run_q8_companion();

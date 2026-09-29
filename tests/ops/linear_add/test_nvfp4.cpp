@@ -15,6 +15,7 @@
 #include <span>
 #include <string>
 #include <vector>
+#include "ops/target_support.h"
 
 namespace {
 
@@ -232,6 +233,10 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
 } // namespace
 
 int main() {
+    if (!ninfer::test::kTargetHasNvfp4) {
+        std::cout << "SKIP: NVFP4 requires an sm_120a build\n";
+        return 77;
+    }
     if (ninfer::test::cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;

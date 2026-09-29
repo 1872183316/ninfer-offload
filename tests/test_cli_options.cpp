@@ -76,6 +76,7 @@ int main() {
                   }),
                   "CLI accepted an unsupported DFlash2 draft count");
     }
+#if NINFER_TARGET_SM >= 120
     const ninfer::cli::Options nvfp4 =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "nvfp4"});
     failures += check(nvfp4.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16,
@@ -84,6 +85,24 @@ int main() {
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "k8v4"});
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "--kv-dtype k8v4 did not select asymmetric K8V4 KV");
+#else
+    for (const char* kv : {"nvfp4", "k8v4"}) {
+        failures += check(rejects([&] {
+                              (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                           "--kv-dtype", kv});
+                          }),
+                          "CLI accepted an NVFP4 KV encoding on a non-sm_120a build");
+    }
+#endif
+    const ninfer::cli::Options offload =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--moe-offload",
+               "--moe-gpu-experts", "32", "--moe-threads", "12", "--moe-expert-stats", "s.txt"});
+    failures += check(offload.moe_offload.enabled && offload.moe_offload.resident_experts == 32 &&
+                          offload.moe_offload.host_threads == 12 &&
+                          offload.moe_offload.expert_stats == "s.txt",
+                      "CLI did not preserve MoE offload options");
+    failures += check(!parse({"ninfer-cli", "model.ninfer", "--prompt", "hello"}).moe_offload.enabled,
+                      "CLI enabled MoE offload by default");
     const std::string help = ninfer::cli::usage_text("ninfer-cli");
     failures +=
         check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos,
