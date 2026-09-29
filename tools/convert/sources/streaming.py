@@ -16,7 +16,9 @@ import threading
 import time
 import urllib.request
 
-from .safetensors import SafetensorsSource, TensorInfo
+import torch
+
+from .safetensors import _DTYPES, SafetensorsSource, TensorInfo
 
 # Source tensor names inside LogicalSource labels ("path:name", "concat(a,b)", "rows(...)").
 _NAME = re.compile(r"(?:^|[:(,])((?:model|mtp|lm_head)[A-Za-z0-9_.]*)")
@@ -158,6 +160,16 @@ class StreamingSafetensorsSource(SafetensorsSource):
             path.unlink(missing_ok=True)
 
     # -- reads -----------------------------------------------------------------------------
+    def read_flat(self, name: str, begin: int = 0, end: int | None = None):
+        # Recipe preparation probes one value per input to validate readability before any job
+        # runs. For a shard not yet fetched, answer that probe from the header's dtype; every
+        # value that reaches an artifact is read from the complete shard during production.
+        info = self.describe(name)
+        count = (end if end is not None else prod(info.shape)) - begin
+        if count <= 1 and info.file not in self._ready:
+            return torch.zeros(max(count, 0), dtype=_DTYPES[info.dtype][0])
+        return super().read_flat(name, begin, end)
+
     def _file(self, path: Path) -> int:
         with self._lock:
             while path not in self._ready:
