@@ -63,6 +63,7 @@ struct MaterializationStats {
     std::uint64_t peak_staging_bytes    = 0;
     std::size_t device_object_count     = 0;
     std::size_t host_object_count       = 0;
+    std::uint64_t replica_bytes         = 0; // Device row replicas of Host parents.
     double upload_seconds               = 0;
 };
 
