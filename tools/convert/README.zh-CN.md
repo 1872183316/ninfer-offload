@@ -116,6 +116,8 @@ python -m tools.convert \
 - `--model` 指向上一步的目录，下载的分片也暂存在这里。
 - `--max-file-bytes 250000000000` 让输出保持单个文件；默认按 32 GB 切成
   `xxx.ninfer` + `xxx.ninfer.part-0001` … 多个文件（同样可用，运行时只传入口文件）。
+  之后想改变已有模型的分片大小（例如为了满足上传限制），用
+  `python -m tools.artifact.reshard xxx.ninfer out/xxx.ninfer --max-file-gb 50`，不要用 `split` 切。
 - Flash-Next 目前只支持 `text` 组件；不要加 `--components mtp/vision` 或 `--proposal`。
 - 想先看看结果多大：加 `--dry-run`，只打印每类权重的格式和预计大小，不下载、不转换。
 

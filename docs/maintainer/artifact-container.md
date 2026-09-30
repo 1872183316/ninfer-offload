@@ -577,7 +577,8 @@ Writer 接收已经确定的组件配置、对象/绑定/使用描述和实际�
 当前 writer 在临时文件中完成生成，失败时清理本次文件，不覆盖已存在的目标。
 Writer 可用 JSON 尾部空白保持预留的 json_bytes 稳定。预留策略和传输块大小属于实现，reader
 只使用 framing 和 files 的实际值。改变分片上限时，可以复制同一逻辑 payload，保留对象、
-绑定与使用记录，生成新的 files 表和文件集合标识。
+绑定与使用记录，生成新的 files 表和文件集合标识；`python -m tools.artifact.reshard <入口>
+<新入口> --max-file-gb N` 按此方式生成新文件集合。
 
 ## 12. 具体例子
 

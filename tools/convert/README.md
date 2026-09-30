@@ -126,6 +126,8 @@ python -m tools.convert \
 - `--model` is the directory from step 1; shards are cached there too.
 - `--max-file-bytes 250000000000` keeps a single output file. The default splits at 32 GB into
   `xxx.ninfer` + `xxx.ninfer.part-0001`, … (also fine; pass only the entry file to NInfer).
+  To change the split of an existing artifact later (e.g. for upload limits), use
+  `python -m tools.artifact.reshard xxx.ninfer out/xxx.ninfer --max-file-gb 50`; do not use `split`.
 - Flash-Next currently supports only the `text` component; do not add `mtp`/`vision` or `--proposal`.
 - Add `--dry-run` to print each weight class's format and the estimated size without downloading
   or converting anything.
