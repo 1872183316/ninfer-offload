@@ -14,7 +14,7 @@ from .pipeline import convert
 from .proposal import DEFAULT_RANKING, add_official_proposal
 from .qwen3_5 import build_model
 from .sources.streaming import StreamingSafetensorsSource
-from . import qwen4exp
+from . import precision, qwen4exp
 from .recipe import Recipe
 from .sources.safetensors import SafetensorsSource
 
@@ -83,6 +83,19 @@ def _function(value: str):
     return result
 
 
+def _report_estimate(recipe):
+    formats = {}
+    for name, selections in recipe.selections.items():
+        cls = precision.classify(name) if recipe.model.parameters[name].projection else None
+        for s in selections:
+            formats.setdefault(cls or "other", set()).add(s.format)
+    sizes = precision.estimate(recipe)
+    for key in (*precision.CLASSES, "other"):
+        if key in formats:
+            print(f"{key:12s} {sizes[key] / 1e9:8.2f} GB  {', '.join(sorted(formats[key]))}")
+    print(f"estimated artifact size: {int(sizes['total'])} bytes ({sizes['total'] / 1e9:.2f} GB)")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -136,6 +149,16 @@ def main(argv=None):
         help="fetch --model shards on demand from this base URL (needs shard_headers.json)",
     )
     parser.add_argument("--stream-budget-gb", type=float, default=20.0)
+    parser.add_argument(
+        "--precision",
+        help="re-quantize projection classes after the recipe, e.g. "
+        "experts=4,expert-down=5,linear=8 (bits: 4, 5, 6, 8)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the configured formats and estimated artifact size, then exit",
+    )
     args = parser.parse_args(argv)
     components = tuple(args.components.split(","))
     if len(components) != len(set(components)):
@@ -144,6 +167,7 @@ def main(argv=None):
     if "base" in paths:
         raise ValueError("select the base source with --model")
     overrides = _pairs(args.resource, "resource")
+    choice = precision.parse(args.precision) if args.precision else {}
     with ExitStack() as stack:
         if args.stream_url:
             base = stack.enter_context(
@@ -168,8 +192,13 @@ def main(argv=None):
         _function(args.recipe)(model, recipe, sources)
         if args.proposal:
             add_official_proposal(recipe, ranking=args.ranking, rows=args.proposal_rows)
+        if choice:
+            precision.apply(recipe, choice)
         if args.override:
             _function(args.override)(model, recipe, sources)
+        if args.dry_run:
+            _report_estimate(recipe)
+            return
 
         if args.stream_url:
             jobs = recipe.prepare(device=args.device, rows_per_chunk=args.rows_per_chunk).weights
@@ -200,6 +229,8 @@ def main(argv=None):
         }
         if args.override:
             provenance["override"] = args.override
+        if args.precision:
+            provenance["precision"] = args.precision
         if args.proposal:
             provenance["ranking"] = str(args.ranking)
         report = convert(

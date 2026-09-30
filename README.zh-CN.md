@@ -51,8 +51,10 @@ x8）、Ubuntu、CUDA 12.8。贪心解码、BF16 KV、4 个提示词各跑 2 遍
 cmake -B build-sm89 -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=Release
 cmake --build build-sm89 -j
 
-# 准备配置、分词器和分片索引（只下载小文件和每个分片的头部）
-python -m tools.convert.prepare_stream https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ flashnext-hf
+# 交互式转换（选择来源、流式或完整下载、精度）：
+python -m tools.convert.wizard
+# 或手动：准备配置、分词器和分片索引（只下载小文件和每个分片的头部）
+python -m tools.convert.download https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ flashnext-hf
 # 边下载边转换（按 15 MB/s 约需 8 小时）
 python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out qwen3_8_flash_next.ninfer \
   --device cuda --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
@@ -62,6 +64,8 @@ python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out q
   --max-context 2048 --kv-capacity 2048 \
   --moe-offload --moe-threads 12 --moe-gpu-experts 64 --moe-expert-stats bench/offload/stats_flash_next.txt
 ```
+
+两种转换方式、精度选择、磁盘需求和排错见[转换器使用说明](tools/convert/README.zh-CN.md)。
 
 目前 Flash-Next 的上下文最长 2051 个 token（QSA 的 token 选择还没实现），也还没有实现 MTP /
 投机解码。`bench/offload/` 里有测速和校准脚本。

@@ -54,8 +54,10 @@ Only the machine above has been tested.
 cmake -B build-sm89 -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=Release
 cmake --build build-sm89 -j
 
-# Convert the official BF16 checkpoint (streams shards; about 8 hours at 15 MB/s).
-python -m tools.convert.prepare_stream https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ flashnext-hf
+# Convert interactively (choose source, streaming or full download, and precision):
+python -m tools.convert.wizard
+# ...or directly: stream the official BF16 checkpoint (about 8 hours at 15 MB/s).
+python -m tools.convert.download https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ flashnext-hf
 python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out qwen3_8_flash_next.ninfer \
   --device cuda --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
   --stream-budget-gb 80 --max-file-bytes 250000000000
@@ -64,6 +66,9 @@ python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out q
   --max-context 2048 --kv-capacity 2048 \
   --moe-offload --moe-threads 12 --moe-gpu-experts 64 --moe-expert-stats bench/offload/stats_flash_next.txt
 ```
+
+The [converter guide](tools/convert/README.md) covers both conversion modes, precision choices,
+disk requirements and troubleshooting.
 
 Flash-Next contexts are limited to 2051 tokens (QSA token selection is not implemented yet), and
 MTP/speculative decoding is not implemented for it. `bench/offload/` holds the evaluation and

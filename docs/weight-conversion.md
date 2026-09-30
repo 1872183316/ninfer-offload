@@ -82,6 +82,21 @@ as `--source dflash=PATH` or `--source dflash2=PATH`. An artifact may contain se
 components; the Engine loads only the ones selected at startup, including at most one speculative
 backend. Component availability and startup selection are independent.
 
+## Change precision by class
+
+`--precision` re-quantizes whole classes of text projections after the recipe, with one grouped
+integer width (4, 5, 6 or 8) per class: `experts` (routed expert gate/up), `expert-down` and
+`linear` (every other layer projection the recipe quantizes). Embeddings, output heads, PLE tables
+and weights a recipe keeps in BF16 are unchanged. `--dry-run` prints the resulting formats and the
+estimated artifact size without reading weights:
+
+```bash
+python3 -m tools.convert --model /path/to/Qwen3.6-35B-A3B --recipe qwen3_6_35b_a3b   --precision experts=5,expert-down=6 --out models/q35-e5.ninfer --dry-run
+```
+
+`python -m tools.convert.wizard` asks for the source, download mode and precision interactively
+and prints the equivalent commands; the [converter guide](../tools/convert/README.md) describes it.
+
 ## Change part of a recipe
 
 Save the following as `my_recipe.py`:
