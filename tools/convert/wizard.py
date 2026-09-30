@@ -304,8 +304,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+        print(__doc__)
+        sys.exit(0)
     try:
         main()
     except KeyboardInterrupt:
         print("\ncancelled / 已取消")
         sys.exit(130)
+    except EOFError:
+        print("\ninput ended before all questions were answered / 输入提前结束，未完成全部问题")
+        sys.exit(1)
