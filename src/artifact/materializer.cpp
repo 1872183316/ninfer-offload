@@ -199,25 +199,38 @@ MaterializedArtifact materialize(const Reader& reader, MaterializationPlan&& pla
         const auto& geometry   = reader.geometry(handle);
         const auto& descriptor = reader.directory().tensor(handle);
         const auto segments    = reader.segments(descriptor.offset, descriptor.bytes);
-        if (segments.size() != 1) {
-            throw ArtifactError(descriptor.id + ": a mapped object must lie in one container file");
+        const auto page        = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
+        const auto delta       = segments.front().file_offset % page;
+        const auto length      = static_cast<std::size_t>(delta + descriptor.bytes);
+        // An object that crosses container files is mapped file by file into one reserved range.
+        // Each later segment starts a file's payload, so both its file offset and its position
+        // in the range must be page aligned; writer-generated file sets satisfy this.
+        for (std::size_t i = 1; i < segments.size(); ++i) {
+            if ((segments[i].file_offset | (delta + segments[i].destination_offset)) % page) {
+                throw ArtifactError(descriptor.id +
+                                    ": container file boundary is not page aligned for mapping");
+            }
         }
-        const auto page    = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
-        const auto begin   = segments[0].file_offset / page * page;
-        const auto delta   = segments[0].file_offset - begin;
-        const auto length  = static_cast<std::size_t>(delta + segments[0].bytes);
-        const auto path    = reader.file_path(segments[0].file_index);
-        const int fd       = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd < 0) { throw ArtifactError(path.string() + ": cannot open for mapping"); }
-        void* base = mmap(nullptr, length, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(begin));
-        ::close(fd);
-        if (base == MAP_FAILED) { throw ArtifactError(descriptor.id + ": mmap failed"); }
+        void* base = mmap(nullptr, length, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (base == MAP_FAILED) { throw ArtifactError(descriptor.id + ": address reservation failed"); }
+        out.mappings_.emplace_back(base, length);
+        for (const auto& segment : segments) {
+            const auto begin  = segment.file_offset / page * page;
+            const auto target = delta + segment.destination_offset - (segment.file_offset - begin);
+            const auto bytes  = static_cast<std::size_t>(segment.file_offset - begin + segment.bytes);
+            const auto path   = reader.file_path(segment.file_index);
+            const int fd      = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+            if (fd < 0) { throw ArtifactError(path.string() + ": cannot open for mapping"); }
+            void* mapped = mmap(static_cast<std::byte*>(base) + target, bytes, PROT_READ,
+                                MAP_SHARED | MAP_FIXED, fd, static_cast<off_t>(begin));
+            ::close(fd);
+            if (mapped == MAP_FAILED) { throw ArtifactError(descriptor.id + ": mmap failed"); }
+        }
         // Row lookups are sparse and random; read-ahead would only evict resident experts.
         (void)madvise(base, length, MADV_RANDOM);
-        out.mappings_.emplace_back(base, length);
         storage.host = WeightParent{geometry, static_cast<const std::byte*>(base) + delta, 0.0F};
         out.stats_.mapped_bytes =
-            checked_add(out.stats_.mapped_bytes, segments[0].bytes, "mapped bytes");
+            checked_add(out.stats_.mapped_bytes, descriptor.bytes, "mapped bytes");
     }
     std::vector<CopyRange> ranges;
     for (const auto& placement : plan.device_objects) {

@@ -153,6 +153,18 @@ void file_roundtrip(DeviceContext& device, const std::filesystem::path& path, bo
         require(elements == weight_element_count(view.shape),
                 "resolved view lost logical coverage");
     }
+    if (writer_fixture) {
+        // The sharded fixture places this object across three container files.
+        Reader reader(path);
+        const auto matrix = reader.find("matrix");
+        const auto bytes  = reader.read_object(matrix);
+        Binder binder(reader);
+        (void)binder.parameter("whole", {130, 130}, Residency::HostMapped);
+        const auto mapped = materialize(reader, std::move(binder).finish(), device);
+        const auto* data  = static_cast<const std::byte*>(mapped.host_parent(matrix).data);
+        require(std::equal(bytes.begin(), bytes.end(), data),
+                "mapped object differs from its bytes across container files");
+    }
     std::cout << path.filename().string() << ": all bound parent bytes and logical views passed\n";
 }
 
