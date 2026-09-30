@@ -109,5 +109,6 @@ disjoint calibration prompts (top 64 experts cover 31-54% of routings per layer)
 | 48 | 11.9-13.0 | 26.7-33.6 |
 | 64 | 12.5-14.1 | 28.6-35.4 |
 
-Repetitions differ by at most 0.1 tok/s. With no resident experts each token reads ~1.43 GB of
-routed-expert weights on the host (~14.4 GB/s effective).
+Repetitions differ by at most 0.1 tok/s. The routed experts occupy 69.2 GB (4.58 bits/weight), so
+with no resident experts each token reads ~1.35 GB of routed-expert weights on the host
+(~13.6 GB/s effective).
