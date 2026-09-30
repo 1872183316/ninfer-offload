@@ -45,6 +45,19 @@ x8）、Ubuntu、CUDA 12.8。贪心解码、BF16 KV、4 个提示词各跑 2 遍
 
 目前只在上面这一台机器上测试过。
 
+## 快速开始：免编译、免转换
+
+预编译的 Linux 程序（RTX 40 系）在 [Releases 页面](https://github.com/1872183316/ninfer-offload/releases)
+（需 v0.1.1 或更新），转换好的 Flash-Next 模型（108 GB，3 个文件）在 ModelScope：
+[mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload](https://modelscope.cn/models/mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload)。
+
+```bash
+modelscope download --model mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload --local_dir flashnext
+./ninfer flashnext/qwen3_8_flash_next.ninfer --prompt "你好" --no-thinking \
+  --max-context 2048 --kv-capacity 2048 \
+  --moe-offload --moe-threads 12 --moe-gpu-experts 64 --moe-expert-stats stats/stats_flash_next.txt
+```
+
 ## 编译、转换和运行 Flash-Next
 
 ```bash

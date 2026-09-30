@@ -48,6 +48,20 @@ this machine's RAM with llama.cpp.
 
 Only the machine above has been tested.
 
+### Quick start without building or converting
+
+Prebuilt Linux binaries (RTX 40-series) are on the
+[releases page](https://github.com/1872183316/ninfer-offload/releases) (v0.1.1 or newer), and the
+converted Flash-Next model (108 GB, three files) is on ModelScope:
+[mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload](https://modelscope.cn/models/mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload).
+
+```bash
+modelscope download --model mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload --local_dir flashnext
+./ninfer flashnext/qwen3_8_flash_next.ninfer --prompt "Hello" --no-thinking \
+  --max-context 2048 --kv-capacity 2048 \
+  --moe-offload --moe-threads 12 --moe-gpu-experts 64 --moe-expert-stats stats/stats_flash_next.txt
+```
+
 ### Build, convert and run Flash-Next
 
 ```bash
