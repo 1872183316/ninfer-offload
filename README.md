@@ -1,3 +1,76 @@
+# NInfer-Offload
+
+> A fork of [NInfer](https://github.com/Neroued/ninfer) that runs 100B+ MoE models on consumer
+> GPUs by keeping routed experts in system memory. [中文说明](README.zh-CN.md)
+
+This fork adds, on top of upstream NInfer (`e31bc99b`):
+
+- **RTX 40-series (sm_89) builds.** FP8 MMA without the sm_120 `kind::` qualifiers; TMA, PDL and
+  NVFP4 routes are excluded, so NVFP4 weights and NVFP4/K8V4 KV caches are rejected on sm_89.
+- **Routed-expert offload** (`--moe-offload`). Routed experts stay in host memory and run on CPU
+  threads (AVX2 row-split kernels); router, shared expert, attention, GDN, head and KV stay on the
+  GPU, and a configurable number of frequently routed experts per layer gets a GPU replica. The
+  CPU/GPU hand-off uses stream memory operations and is CUDA Graph capturable.
+- **Qwen3.8-Flash-Next** (`Qwen4ExpForCausalLM`, 177B weights incl. a 51B n-gram table):
+  hyper-connection residual streams, the PLE n-gram injection with a host-mapped table, the
+  24-query/2-KV attention geometry and the sigmoid-gated GatedDeltaNet.
+- **Streaming conversion** from ModelScope/Hugging Face shards (the 354 GB BF16 checkpoint is
+  converted with ~80 GB of scratch disk) and an **independent FP32 reference**
+  (`tools/validate/qwen4exp_reference.py`) for numerical validation.
+
+Everything in the rest of this README describes upstream NInfer; the fork-specific design,
+limits, validation and measurements are in [docs/maintainer/expert-offload.md](docs/maintainer/expert-offload.md).
+
+### Results (one development machine)
+
+Xeon E5-2673 v3 (12 cores, ~21 GB/s measured memory read), 94 GB RAM, RTX 4060 Ti 16 GB (PCIe 3.0
+x8), Ubuntu, CUDA 12.8. Greedy decode, BF16 KV, 4 prompts x 2 repetitions:
+
+| Model (routed experts) | GPU experts per layer | Decode tok/s |
+|---|---|---|
+| Qwen3.8-Flash-Next, experts 4.58 bits/weight, 108 GB artifact | 0 (5.2 GB VRAM) | 10.0-10.2 |
+| | 64 | 12.5-14.1 |
+| Qwen3.6-35B-A3B groupwise-int | 128 | 47.5-59.3 |
+| | 176 | 60.6-68.7 |
+
+For comparison on the same machine, ik_llama.cpp reached 14.6 tok/s on a Flash-Next GGUF whose
+routed experts are 2.72 bits/weight, and 43.8-44.4 tok/s on the 35B-A3B UD-Q4_K_M GGUF; see the
+offload document for conditions and caveats. The 111 GB UD-Q4_K_XL Flash-Next GGUF does not fit
+this machine's RAM with llama.cpp.
+
+### Requirements
+
+- NVIDIA RTX 40-series (sm_89) or RTX 5090 (sm_120a). RTX 30-series and older are not supported.
+- x86-64 CPU with AVX2, FMA, F16C and BMI2 (Intel Haswell or AMD Zen and later).
+- For Flash-Next: about 80 GB of RAM (69 GB of routed experts) and 110 GB of disk; decode speed
+  scales with memory bandwidth.
+- Linux, CUDA 12.8 or newer, GCC 13.
+
+Only the machine above has been tested.
+
+### Build, convert and run Flash-Next
+
+```bash
+cmake -B build-sm89 -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_BUILD_TYPE=Release
+cmake --build build-sm89 -j
+
+# Convert the official BF16 checkpoint (streams shards; about 8 hours at 15 MB/s).
+python -m tools.convert.prepare_stream https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ flashnext-hf
+python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out qwen3_8_flash_next.ninfer \
+  --device cuda --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
+  --stream-budget-gb 80 --max-file-bytes 250000000000
+
+./build-sm89/apps/ninfer qwen3_8_flash_next.ninfer --prompt "Hello" --no-thinking \
+  --max-context 2048 --kv-capacity 2048 \
+  --moe-offload --moe-threads 12 --moe-gpu-experts 64 --moe-expert-stats bench/offload/stats_flash_next.txt
+```
+
+Flash-Next contexts are limited to 2051 tokens (QSA token selection is not implemented yet), and
+MTP/speculative decoding is not implemented for it. `bench/offload/` holds the evaluation and
+calibration scripts.
+
+---
+
 # NInfer
 
 > Selected checkpoints. Maximum single-GPU inference performance.
