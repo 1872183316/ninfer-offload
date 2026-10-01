@@ -24,6 +24,7 @@ import urllib.request
 
 import torch
 
+from ..download import USER_AGENT
 from .safetensors import _DTYPES, SafetensorsSource, TensorInfo
 
 # Network failures worth retrying: socket errors and truncated HTTP bodies.
@@ -196,7 +197,8 @@ class StreamingSafetensorsSource(SafetensorsSource):
             try:
                 request = urllib.request.Request(
                     self.url + segment.shard.name,
-                    headers={"Range": f"bytes={segment.begin + have}-{segment.end - 1}"})
+                    headers={**USER_AGENT,
+                             "Range": f"bytes={segment.begin + have}-{segment.end - 1}"})
                 with urllib.request.urlopen(request, timeout=120) as response, \
                         part.open("ab") as out:
                     if response.status != 206:
@@ -290,7 +292,8 @@ class StreamingSafetensorsSource(SafetensorsSource):
 
     def _range(self, shard: Path, offset: int, size: int) -> bytes:
         request = urllib.request.Request(
-            self.url + shard.name, headers={"Range": f"bytes={offset}-{offset + size - 1}"})
+            self.url + shard.name,
+            headers={**USER_AGENT, "Range": f"bytes={offset}-{offset + size - 1}"})
         for attempt in range(10):
             try:
                 with urllib.request.urlopen(request, timeout=60) as response:

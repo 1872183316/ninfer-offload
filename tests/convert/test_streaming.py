@@ -1,6 +1,7 @@
 import functools
 import http.server
 import json
+import os
 from pathlib import Path
 import threading
 
@@ -87,8 +88,19 @@ def _run(source, jobs, tensors, reads=None):
             half = 256 * 32
             values = torch.cat([source.read_flat(name, 0, half), source.read_flat(name, half)])
             assert torch.equal(values, tensors[name].reshape(-1)), name
-            held = sum(p.stat().st_size for p in source.cache.iterdir())
-            source.observed_peak = max(getattr(source, "observed_peak", 0), held)
+            source.observed_peak = max(getattr(source, "observed_peak", 0), _cache_bytes(source))
+
+
+def _cache_bytes(source):
+    # Fetch threads rename .part files concurrently; a vanished entry was counted under its
+    # other name or is gone.
+    total = 0
+    for entry in os.scandir(source.cache):
+        try:
+            total += entry.stat().st_size
+        except FileNotFoundError:
+            pass
+    return total
 
 
 def test_streaming_downloads_only_job_ranges_within_budget(remote):

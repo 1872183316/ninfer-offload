@@ -28,6 +28,8 @@ SMALL_FILES = (
     "preprocessor_config.json", "video_preprocessor_config.json", "LICENSE",
 )
 _TRANSIENT = (OSError, http.client.HTTPException)
+# Some mirrors (hf-mirror.com) reject the default Python-urllib agent.
+USER_AGENT = {"User-Agent": "ninfer-offload/1.0"}
 
 
 def repository_url(hub: str, repo: str, endpoint: str | None = None) -> str:
@@ -41,7 +43,7 @@ def repository_url(hub: str, repo: str, endpoint: str | None = None) -> str:
 
 
 def fetch(url: str, start: int | None = None, end: int | None = None) -> bytes:
-    headers = {} if start is None else {"Range": f"bytes={start}-{end}"}
+    headers = dict(USER_AGENT) if start is None else {**USER_AGENT, "Range": f"bytes={start}-{end}"}
     for attempt in range(5):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=headers),
@@ -105,7 +107,8 @@ def _download(url: str, path: Path, size: int, progress) -> None:
         if have >= size:
             break
         try:
-            request = urllib.request.Request(url, headers={"Range": f"bytes={have}-{size - 1}"})
+            request = urllib.request.Request(
+                url, headers={**USER_AGENT, "Range": f"bytes={have}-{size - 1}"})
             with urllib.request.urlopen(request, timeout=120) as response, part.open("ab") as file:
                 while chunk := response.read(1 << 22):
                     file.write(chunk)
