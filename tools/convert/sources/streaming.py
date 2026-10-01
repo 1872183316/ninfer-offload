@@ -1,18 +1,23 @@
-"""Safetensors checkpoint streamed shard-by-shard from a remote repository.
+"""Safetensors checkpoint streamed from a remote repository in job order.
 
-The converter's job order determines the order of source shards. A background fetcher downloads
-shards ahead of that order within a disk budget, and a shard is deleted once no remaining job
-reads it. This converts checkpoints larger than local disk without changing conversion results.
+The converter's jobs determine which source tensors are read and in what order. A background
+fetcher downloads exactly those byte ranges (adjacent tensors of one job in one shard share a
+request) ahead of the converter, within a disk budget, and deletes each range once no remaining job
+reads it. Local disk use is therefore bounded by the budget regardless of how the checkpoint lays
+tensors out across shards, and conversion results are unchanged.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import http.client
 import json
 from math import prod
 import os
 from pathlib import Path
 import re
+import shutil
+import sys
 import threading
 import time
 import urllib.request
@@ -27,14 +32,36 @@ _TRANSIENT = (OSError, http.client.HTTPException)
 # Source tensor names inside LogicalSource labels ("path:name", "concat(a,b)", "rows(...)").
 _NAME = re.compile(r"(?:^|[:(,])((?:model|mtp|lm_head)[A-Za-z0-9_.]*)")
 
+# Tensors of one job in one shard separated by at most this many bytes share a download.
+_COALESCE_GAP = 1 << 20
+
+
+@dataclass(eq=False)
+class _Segment:
+    shard: Path
+    begin: int  # absolute byte range in the shard
+    end: int
+    job: int  # first job that reads it
+    last_job: int
+    order: int  # position in the fetch order
+    state: str = "pending"  # pending | fetching | ready | released
+
+    @property
+    def size(self) -> int:
+        return self.end - self.begin
+
 
 class StreamingSafetensorsSource(SafetensorsSource):
-    """`root` holds config/index/tokenizer files and `shard_headers.json`; shards go to root."""
+    """`root` holds config/index/tokenizer files and `shard_headers.json`.
+
+    Downloaded ranges live in `root/.stream/`. A shard already present in `root` with its full
+    size is read locally.
+    """
 
     def __init__(self, root: str | Path, url: str, budget_bytes: int, parallel: int = 4):
         super().__init__(root)
         headers = json.loads((self.root / "shard_headers.json").read_text())
-        self._remote = {}
+        self._remote: dict[Path, int] = {}
         for file, entry in headers.items():
             path = self.root / file
             infos = {}
@@ -45,67 +72,90 @@ class StreamingSafetensorsSource(SafetensorsSource):
             self._headers[path] = infos
             self._remote[path] = entry["data_offset"] + max(
                 (t["data_offsets"][1] for t in entry["tensors"].values()), default=0)
+        self._local = {p for p in self._remote
+                       if p.is_file() and p.stat().st_size == self._remote[p]}
         self.url = url.rstrip("/") + "/"
         self.budget = budget_bytes
         self.parallel = parallel
+        self.cache = self.root / ".stream"
         self._lock = threading.Condition()
-        self._ready: set[Path] = {p for p in self._remote if p.is_file()
-                                  and p.stat().st_size == self._remote[p]}
-        self._fetching: set[Path] = set()
-        self._deleted: set[Path] = set()
-        self._order: list[Path] = []      # first-use order of shards
-        self._last_job: dict[Path, int] = {}
+        self._segments: list[_Segment] = []
+        self._of: dict[str, _Segment] = {}  # tensor name -> segment holding it
+        self._large_jobs: set[int] = set()  # jobs whose ranges are released as they advance
         self._job = -1
         self._error: BaseException | None = None
         self._stop = False
-        self._single_pass: set[Path] = set()
-        self._waiting: set[Path] = set()   # shards the converter is blocked on
+        self._waiting: set[_Segment] = set()
+        self._fds_seg: dict[_Segment, int] = {}
         self.downloaded_bytes = 0
+        self.refetched_bytes = 0
+        self.peak_bytes = 0
 
     # -- planning --------------------------------------------------------------------------
-    def plan(self, jobs_files: list[list[Path]]) -> None:
-        """jobs_files[i] lists the shards job i reads, in read order."""
-        seen = set()
-        for index, files in enumerate(jobs_files):
-            for path in files:
-                self._last_job[path] = index
-                if path not in seen:
-                    seen.add(path)
-                    self._order.append(path)
-        for _ in range(self.parallel):
-            threading.Thread(target=self._fetch_loop, daemon=True).start()
-
-    def files_of(self, labels: list[str]) -> list[Path]:
-        files = []
+    def tensors_of(self, labels: list[str]) -> list[str]:
+        """Source tensor names read through `labels`, in read order."""
+        names: list[str] = []
         for label in labels:
             for name in _NAME.findall(label):
-                path = self.weight_map.get(name)
-                if path is not None and path not in files:
-                    files.append(path)
-        return files
+                if name in self.weight_map and name not in names:
+                    names.append(name)
+        return names
+
+    def plan(self, jobs_tensors: list[list[str]]) -> None:
+        """jobs_tensors[i] lists the source tensors job i reads, in read order."""
+        uses: dict[str, list[int]] = {}
+        for index, names in enumerate(jobs_tensors):
+            for name in names:
+                uses.setdefault(name, []).append(index)
+        for index, names in enumerate(jobs_tensors):
+            job_bytes = 0
+            current: _Segment | None = None
+            for name in names:
+                info = self.describe(name)
+                if info.file in self._local or uses[name][0] != index:
+                    continue
+                last = uses[name][-1]
+                job_bytes += info.bytes
+                if (current is not None and current.shard == info.file
+                        and current.last_job == last
+                        and 0 <= info.offset - current.end <= _COALESCE_GAP):
+                    current.end = info.offset + info.bytes
+                else:
+                    current = _Segment(info.file, info.offset, info.offset + info.bytes,
+                                       index, last, len(self._segments))
+                    self._segments.append(current)
+                self._of[name] = current
+            if job_bytes > self.budget // 4:
+                self._large_jobs.add(index)
+        self.cache.mkdir(exist_ok=True)
+        for segment in self._segments:
+            if self._path(segment).is_file():
+                segment.state = "ready"
+        for _ in range(self.parallel):
+            threading.Thread(target=self._fetch_loop, daemon=True).start()
 
     def begin_job(self, index: int) -> None:
         with self._lock:
             self._job = index
-            for path in list(self._ready):
-                if self._last_job.get(path, -1) < index:
-                    self._release(path)
+            for segment in self._segments:
+                if segment.state == "ready" and segment.last_job < index:
+                    self._release(segment)
             self._lock.notify_all()
 
     # -- fetching --------------------------------------------------------------------------
-    def _held_bytes(self) -> int:
-        return sum(self._remote[p] for p in self._ready | self._fetching)
+    def _path(self, segment: _Segment) -> Path:
+        return self.cache / f"{segment.shard.name}.{segment.begin}-{segment.end}"
 
-    def _next(self) -> Path | None:
-        for path in self._waiting:
-            if path not in self._ready and path not in self._fetching:
-                return path
-        for path in self._order:
-            if path in self._ready or path in self._fetching or path in self._deleted:
-                continue
-            if self._last_job.get(path, -1) < self._job:
-                continue
-            return path
+    def _held_bytes(self) -> int:
+        return sum(s.size for s in self._segments if s.state in ("fetching", "ready"))
+
+    def _next(self) -> _Segment | None:
+        for segment in self._waiting:
+            if segment.state in ("pending", "released"):
+                return segment
+        for segment in self._segments:
+            if segment.state == "pending" and segment.last_job >= self._job:
+                return segment
         return None
 
     def _fetch_loop(self) -> None:
@@ -114,39 +164,43 @@ class StreamingSafetensorsSource(SafetensorsSource):
                 while True:
                     if self._stop or self._error:
                         return
-                    path = self._next()
-                    if path is None:
-                        return
-                    # Only a shard the converter is blocked on may exceed the budget; prefetching
-                    # past it would otherwise grow without bound while earlier shards stay held.
-                    if (path in self._waiting
-                            or self._held_bytes() + self._remote[path] <= self.budget):
-                        self._fetching.add(path)
+                    segment = self._next()
+                    # Only a range the converter is blocked on may exceed the budget.
+                    if segment is not None and (
+                            segment in self._waiting
+                            or self._held_bytes() + segment.size <= self.budget):
+                        if segment.state == "released":
+                            self.refetched_bytes += segment.size
+                        segment.state = "fetching"
+                        self.peak_bytes = max(self.peak_bytes, self._held_bytes())
                         break
                     self._lock.wait(timeout=5)
             try:
-                self._download(path)
+                self._download(segment)
             except BaseException as error:  # surface in the converter thread
                 with self._lock:
                     self._error = error
                     self._lock.notify_all()
                 return
             with self._lock:
-                self._fetching.discard(path)
-                self._ready.add(path)
+                segment.state = "ready"
                 self._lock.notify_all()
 
-    def _download(self, path: Path) -> None:
-        part = path.with_suffix(path.suffix + ".part")
-        size = self._remote[path]
+    def _download(self, segment: _Segment) -> None:
+        path = self._path(segment)
+        part = path.with_name(path.name + ".part")
         for attempt in range(20):
             have = part.stat().st_size if part.exists() else 0
-            if have >= size:
+            if have >= segment.size:
                 break
             try:
-                request = urllib.request.Request(self.url + path.name,
-                                                 headers={"Range": f"bytes={have}-{size - 1}"})
-                with urllib.request.urlopen(request, timeout=120) as response, part.open("ab") as out:
+                request = urllib.request.Request(
+                    self.url + segment.shard.name,
+                    headers={"Range": f"bytes={segment.begin + have}-{segment.end - 1}"})
+                with urllib.request.urlopen(request, timeout=120) as response, \
+                        part.open("ab") as out:
+                    if response.status != 206:
+                        raise RuntimeError(f"{segment.shard.name}: server ignored the byte range")
                     while True:
                         chunk = response.read(1 << 22)
                         if not chunk:
@@ -155,85 +209,113 @@ class StreamingSafetensorsSource(SafetensorsSource):
                         self.downloaded_bytes += len(chunk)
             except _TRANSIENT:
                 time.sleep(min(60, 5 * (attempt + 1)))
-        if part.stat().st_size != size:
-            raise OSError(f"{path.name}: download incomplete")
+        if not part.exists() or part.stat().st_size != segment.size:
+            raise OSError(f"{segment.shard.name}[{segment.begin}:{segment.end}]: "
+                          "download incomplete")
         part.replace(path)
 
-    def _release(self, path: Path) -> None:
-        if path in self._ready:
-            self._ready.discard(path)
-            self._deleted.add(path)
-            for fd_path in [p for p in self._fds if p == path]:
-                os.close(self._fds.pop(fd_path))
-            path.unlink(missing_ok=True)
+    def _release(self, segment: _Segment) -> None:
+        segment.state = "released"
+        fd = self._fds_seg.pop(segment, None)
+        if fd is not None:
+            os.close(fd)
+        self._path(segment).unlink(missing_ok=True)
+
+    def _acquire(self, name: str, info: TensorInfo) -> _Segment:
+        """Wait until the range holding `name` is on disk; called with the lock held."""
+        segment = self._of.get(name)
+        if segment is None or (segment.state == "released" and segment.last_job < self._job):
+            # Unplanned read: fetch exactly this tensor for the current job.
+            segment = _Segment(info.file, info.offset, info.offset + info.bytes,
+                               self._job, self._job, len(self._segments))
+            self._segments.append(segment)
+            self._of[name] = segment
+        elif segment.state == "released":
+            # A large job read a range again after a later one; hold its ranges from now on.
+            self._large_jobs.discard(self._job)
+        self._waiting.add(segment)
+        self._lock.notify_all()
+        try:
+            while segment.state != "ready":
+                if self._error:
+                    raise self._error
+                self._lock.wait(timeout=5)
+        finally:
+            self._waiting.discard(segment)
+        if self._job in self._large_jobs:
+            # Ranges of a large job are read sequentially; earlier ones are complete.
+            for other in self._segments:
+                if (other.state == "ready" and other.job == self._job
+                        and other.last_job == self._job and other.order < segment.order):
+                    self._release(other)
+            self._lock.notify_all()
+        return segment
 
     # -- reads -----------------------------------------------------------------------------
     def read_flat(self, name: str, begin: int = 0, end: int | None = None):
-        # Recipe preparation probes one value per input to validate readability before any job
-        # runs. For a shard not yet fetched, answer that probe from the header's dtype; every
-        # value that reaches an artifact is read from the complete shard during production.
         info = self.describe(name)
-        count = (end if end is not None else prod(info.shape)) - begin
-        # Only before planning (self._job < 0): production reads go through the shard fetcher.
-        if self._job < 0 and info.file not in self._ready and info.file not in self._fetching:
-            dtype, word = _DTYPES[info.dtype]
+        if info.file in self._local:
+            return super().read_flat(name, begin, end)
+        elements = prod(info.shape)
+        end = elements if end is None else end
+        if not 0 <= begin <= end <= elements:
+            raise ValueError(f"{name}: source element range [{begin},{end}) exceeds {info.shape}")
+        dtype, word = _DTYPES[info.dtype]
+        count = end - begin
+        if count == 0:
+            return torch.empty(0, dtype=dtype)
+        if self._job < 0:
+            # Recipe preparation probes one value per input to validate readability before any
+            # job runs; answer it from the header's dtype. Other reads before the first job are
+            # served exactly by a range request without touching the disk. Every value that
+            # reaches an artifact is read through planned ranges during production.
             if count <= 1:
-                return torch.zeros(max(count, 0), dtype=dtype)
-            if count * word <= self._remote_read_limit:
-                # Small tensors (norms, convolutions) of an unfetched shard: exact range read.
-                offset = info.offset + begin * word
-                request = urllib.request.Request(
-                    self.url + info.file.name,
-                    headers={"Range": f"bytes={offset}-{offset + count * word - 1}"},
-                )
-                raw = b""
-                for attempt in range(10):
-                    try:
-                        with urllib.request.urlopen(request, timeout=60) as response:
-                            raw = response.read()
-                        if len(raw) == count * word:
-                            break
-                    except _TRANSIENT:
-                        pass
-                    time.sleep(3 * (attempt + 1))
-                if len(raw) != count * word:
-                    raise OSError(f"{name}: short remote range read")
-                return torch.frombuffer(bytearray(raw), dtype=dtype)
-        return super().read_flat(name, begin, end)
-
-    _remote_read_limit = 64 << 20
-
-    def _file(self, path: Path) -> int:
+                return torch.zeros(count, dtype=dtype)
+            offset = info.offset + begin * word
+            return torch.frombuffer(bytearray(self._range(info.file, offset, count * word)),
+                                    dtype=dtype)
+        # Only the converter thread reads and releases ranges, so the file stays valid after
+        # the lock is dropped.
         with self._lock:
-            self._waiting.add(path)
-            self._lock.notify_all()
-            try:
-                while path not in self._ready:
-                    if self._error:
-                        raise self._error
-                    if path in self._deleted:
-                        raise RuntimeError(f"{path.name} was released before a later read")
-                    self._lock.wait(timeout=5)
-            finally:
-                self._waiting.discard(path)
-            # A single-pass shard earlier in this job's order is complete once a later one opens.
-            # Before planning (recipe preparation) nothing is released.
-            if path in self._last_job:
-                position = self._order.index(path)
-                for other in list(self._ready):
-                    if (other in self._single_pass and other in self._last_job
-                            and self._last_job[other] == self._job
-                            and self._order.index(other) < position):
-                        self._release(other)
-            self._lock.notify_all()
-        return super()._file(path)
+            segment = self._acquire(name, info)
+            fd = self._fds_seg.get(segment)
+            if fd is None:
+                fd = os.open(self._path(segment), os.O_RDONLY)
+                self._fds_seg[segment] = fd
+        raw = os.pread(fd, count * word, info.offset - segment.begin + begin * word)
+        if len(raw) != count * word:
+            raise ValueError(f"{name}: short source read")
+        self.bytes_read += len(raw)
+        return torch.frombuffer(bytearray(raw), dtype=dtype)
 
-    def mark_single_pass(self, paths: list[Path]) -> None:
-        """Shards read once, sequentially, by one job may be released as the job advances."""
-        self._single_pass.update(paths)
+    def _range(self, shard: Path, offset: int, size: int) -> bytes:
+        request = urllib.request.Request(
+            self.url + shard.name, headers={"Range": f"bytes={offset}-{offset + size - 1}"})
+        for attempt in range(10):
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    raw = response.read()
+                if len(raw) == size:
+                    return raw
+            except _TRANSIENT:
+                pass
+            time.sleep(3 * (attempt + 1))
+        raise OSError(f"{shard.name}: short remote range read")
 
     def close(self) -> None:
         with self._lock:
             self._stop = True
             self._lock.notify_all()
+            for segment in list(self._fds_seg):
+                os.close(self._fds_seg.pop(segment))
+        if self._segments:
+            print(f"streaming: downloaded {self.downloaded_bytes / 1e9:.1f} GB "
+                  f"(refetched {self.refetched_bytes / 1e9:.1f} GB), "
+                  f"peak range cache {self.peak_bytes / 1e9:.1f} GB", file=sys.stderr, flush=True)
         super().close()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+        if exc_type is None and self.cache.is_dir():
+            # Keep downloaded ranges after a failure so that a rerun reuses them.
+            shutil.rmtree(self.cache)

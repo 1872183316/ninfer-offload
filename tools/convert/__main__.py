@@ -202,14 +202,14 @@ def main(argv=None):
 
         if args.stream_url:
             jobs = recipe.prepare(device=args.device, rows_per_chunk=args.rows_per_chunk).weights
-            plan = [
-                base.files_of([model.parameters[name].source.label for name in job.parameters])
-                for job in jobs
-            ]
-            base.mark_single_pass(
-                [f for files in plan if len(files) > 4 for f in files]
+            base.plan(
+                [
+                    base.tensors_of(
+                        [model.parameters[name].source.label for name in job.parameters]
+                    )
+                    for job in jobs
+                ]
             )
-            base.plan(plan)
 
         def progress(index, total, job):
             if args.stream_url:

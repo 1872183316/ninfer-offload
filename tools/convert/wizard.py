@@ -231,15 +231,16 @@ def main() -> None:
     budget = None
     if stream:
         free_work = free_out - size if shared else free_bytes(model_dir)
-        budget = int(max(0, min(80 * GB, free_work - MARGIN)) // GB)
-        need_work = 20 * GB + MARGIN
+        budget = int(max(0, min(20 * GB, free_work - MARGIN)) // GB)
+        need_work = 8 * GB + MARGIN
         if free_work < need_work:
             raise SystemExit(
-                f"Not enough disk: output needs {size / GB:.0f} GB plus at least 30 GB of shard "
-                f"cache; {free_out / GB:.0f} GB free. / 磁盘空间不足。")
-        if budget < 80:
-            print(f"  Shard cache limited to {budget} GB by free space; conversion may be slower."
-                  f"\n  受可用空间限制，分片缓存为 {budget} GB，转换可能变慢。")
+                f"Not enough disk: output needs {size / GB:.0f} GB plus at least "
+                f"{need_work / GB:.0f} GB for the download cache; {free_out / GB:.0f} GB free. "
+                f"/ 磁盘空间不足。")
+        if budget < 20:
+            print(f"  Download cache limited to {budget} GB by free space; conversion may be "
+                  f"slower.\n  受可用空间限制，下载缓存为 {budget} GB，转换可能变慢。")
     else:
         missing = max(0, source_bytes - present_bytes)
         need = size + MARGIN + (missing if shared else 0)
@@ -257,7 +258,7 @@ def main() -> None:
     except ImportError:
         raise SystemExit("PyTorch is required: pip install torch numpy / 需要安装 PyTorch")
 
-    command = [sys.executable, "-m", "tools.convert", "--model", str(model_dir),
+    command = [sys.executable, "-u", "-m", "tools.convert", "--model", str(model_dir),
                "--recipe", recipe_name, "--out", str(out), "--device", device,
                "--components", ",".join(components), "--max-file-bytes", "250000000000"]
     if choice:
@@ -268,7 +269,7 @@ def main() -> None:
         command.append("--proposal")
     if stream:
         command += ["--stream-url", url, "--stream-budget-gb", str(budget)]
-    fetch = [sys.executable, "-m", "tools.convert.download", url, str(model_dir), "--all"] \
+    fetch = [sys.executable, "-u", "-m", "tools.convert.download", url, str(model_dir), "--all"] \
         if url and not stream else None
 
     lines = ([shlex.join(fetch)] if fetch else []) + [shlex.join(command)]

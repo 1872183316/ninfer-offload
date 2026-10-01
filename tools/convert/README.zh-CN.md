@@ -64,12 +64,15 @@ python -m tools.convert.wizard
 | | 完整下载后转换 | 流式转换 |
 |---|---|---|
 | 适用 | 磁盘能同时放下原版权重和输出文件 | 原版权重比可用磁盘空间还大，或不想保留原版 |
-| 磁盘占用 | 原版权重 + 输出文件 | 输出文件 + 分片缓存（可设上限） |
+| 磁盘占用 | 原版权重 + 输出文件 | 输出文件 + 有上限的下载缓存（`--stream-budget-gb`） |
 | 原版权重 | 保留，可以用不同精度多次转换 | 用完即删，换精度要重新下载 |
 
-**流式转换原理**：转换器先按配方排好任务顺序，算出每个 safetensors 分片在哪个任务首次用到、
-最后一次用到；后台 6 个线程按这个顺序提前下载（HTTP Range，断点续传），
-缓存总量不超过 `--stream-budget-gb`；分片的最后一个任务完成后立即删除。结果与本地转换完全相同。
+**流式转换原理**：转换器先按配方排好任务顺序，算出每个任务要读哪些原版张量；
+后台 6 个线程按这个顺序只下载这些张量的字节范围（HTTP Range，断点续传；同一任务里相邻的张量合并成一个请求），
+存到 `<模型目录>/.stream/`，缓存总量不超过 `--stream-budget-gb`。每段数据在最后一个用到它的任务完成后立即删除；
+超过缓存上限四分之一的大任务会边转换边释放已读完的部分。所以无论原版权重在分片里怎么分布，
+磁盘占用都不会超过上限，每个字节通常只下载一次。模型目录里已经存在的完整分片直接读本地。
+转换结束时会打印下载总量和缓存峰值。结果与本地转换完全相同。
 
 ---
 
@@ -80,9 +83,8 @@ python -m tools.convert.wizard
 
 ### 4.1 磁盘空间
 
-流式转换需要：输出约 108 GB + 分片缓存（建议 80 GB）+ 约 10 GB 余量，合计约 **200 GB**。
-缓存小一些也能转换，只是更慢：PLE n-gram 表的数据分散在大多数分片里，而且排在最后处理，
-这些分片要一直留在缓存里；缓存满了以后后台预取会停下，只剩串行下载。
+流式转换需要：输出约 108 GB + 下载缓存（默认 20 GB）+ 约 10 GB 余量，合计约 **140 GB**。
+缓存里只放接下来几个任务要读的数据；只有下载明显快于转换时，调大缓存才有用。
 
 ### 4.2 第一步：下载索引（只有几 MB）
 
@@ -109,7 +111,7 @@ python -m tools.convert \
   --recipe qwen3_8_flash_next \
   --out models/qwen3_8_flash_next.ninfer \
   --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
-  --stream-budget-gb 80 \
+  --stream-budget-gb 20 \
   --max-file-bytes 250000000000
 ```
 
@@ -152,7 +154,7 @@ systemctl --user status ninfer-convert     # 状态；stop 停止；失败后重
 
 ```bash
 du -h  models/.qwen3_8_flash_next.ninfer.*.tmp   # 已写入量，最终约 108 GB
-du -sh models/flashnext-hf                       # 分片缓存占用
+du -sh models/flashnext-hf/.stream               # 下载缓存占用
 ```
 
 成功后临时文件改名为 `qwen3_8_flash_next.ninfer`，并生成 `qwen3_8_flash_next.ninfer.conversion.json`
@@ -160,10 +162,10 @@ du -sh models/flashnext-hf                       # 分片缓存占用
 
 ### 4.6 中断后怎么办
 
-- 已完整下载的分片会被复用，未完成的 `.part` 文件从断点继续下载。
-- 输出文件不能续写，转换从头开始；之前已用完删除的分片要重新下载。
+- `.stream/` 里已完整下载的数据段会被复用，未完成的 `.part` 文件从断点继续下载。
+- 输出文件不能续写，转换从头开始；之前已用完删除的数据段要重新下载。
 - 重启前删除残留的临时输出：`rm models/.qwen3_8_flash_next.ninfer.*.tmp`。
-- 成功后可删除 `models/flashnext-hf` 里剩余的 `*.safetensors`、`*.part`，保留 tokenizer 和 config。
+- 成功后可删除 `models/flashnext-hf/.stream`，保留 tokenizer 和 config。
 
 ---
 
@@ -297,7 +299,7 @@ NInfer 的 GPU 和 CPU 计算内核目前只实现了 4/5/6/8 位分组整数（
 | `--rows-per-chunk` | 512 | 每次处理的矩阵行数；内存或显存不足时调小 |
 | `--max-file-bytes` | 32000000000 | 单文件上限（字节），超过则切成 `.part-000N` |
 | `--stream-url URL` | 无 | 开启流式模式（需要 `download` 生成的 `shard_headers.json`） |
-| `--stream-budget-gb` | 20 | 流式分片缓存上限（GB）；当前任务正在等待的分片可以超出 |
+| `--stream-budget-gb` | 20 | 流式下载缓存上限（GB）；当前任务正在等待的数据段可以超出 |
 
 ---
 
@@ -377,7 +379,7 @@ python -m tools.validate.qwen4exp_reference models/qwen3_8_flash_next.ninfer \
 | 找不到 `shard_headers.json` | 流式模式要先运行 `tools.convert.download`，或 `--model` 指错了目录 |
 | `model.safetensors.index.json not found` | URL 或仓库名错误；在浏览器打开 `<前缀>config.json` 应能直接下载 |
 | `xxx.safetensors: download incomplete` | 多次重试仍失败：网络长时间中断或磁盘已满。`df -h` 查看后重新运行（已下载分片会复用） |
-| 下载速度明显下降且不恢复 | 分片缓存已满，只剩串行下载；腾出空间后调大 `--stream-budget-gb` 重新运行 |
+| 下载速度明显下降且不恢复 | 下载缓存已装满后续任务的数据，瓶颈在转换本身；调大 `--stream-budget-gb` 可以让下载跑得更靠前 |
 | `... was released before a later read` | 分片被提前删除（不应发生）；删除该分片后重新运行 |
 | `bits must be one of 4, 5, 6, 8` | 1～3 位暂不支持，见 [6.3](#63-为什么没有-123-位) |
 | `CUDA out of memory` | 调小 `--rows-per-chunk`（如 128）或用 `--device cpu` |

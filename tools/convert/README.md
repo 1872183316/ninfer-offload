@@ -69,13 +69,18 @@ repeat a conversion later without it.
 | | Full download, then convert | Streaming |
 |---|---|---|
 | Use when | The disk holds both the original weights and the output | The original weights are larger than your free space, or you don't want to keep them |
-| Disk usage | Original weights + output | Output + a bounded shard cache |
+| Disk usage | Original weights + output | Output + a bounded download cache (`--stream-budget-gb`) |
 | Original weights | Kept; convert again at another precision without downloading | Deleted as used; another precision downloads again |
 
-**How streaming works**: the converter orders its jobs from the recipe and works out which job
-first and last reads each safetensors shard. Six background threads download shards ahead in that
-order (HTTP range requests, resumable), keeping the cache under `--stream-budget-gb`; a shard is
-deleted as soon as its last job finishes. The output is identical to a local conversion.
+**How streaming works**: the converter orders its jobs from the recipe and works out which source
+tensors each job reads. Six background threads download exactly those byte ranges ahead of the
+converter (HTTP range requests, resumable; adjacent tensors of one job share a request) into
+`<model dir>/.stream/`, keeping the cache under `--stream-budget-gb`; each range is deleted as soon
+as its last job finishes, and a job larger than a quarter of the budget releases its ranges as it
+advances. Disk use therefore stays within the budget however the checkpoint spreads tensors over
+its shards, and each byte is normally downloaded once. A shard already present in the model
+directory is read locally. At the end the converter prints the downloaded bytes and the peak cache
+size. The output is identical to a local conversion.
 
 ---
 
@@ -87,10 +92,9 @@ about 108 GB. Every shard is downloaded once, so the total time is dominated by 
 
 ### 4.1 Disk space
 
-Streaming needs about 108 GB of output + an 80 GB shard cache (recommended) + ~10 GB margin,
-**about 200 GB** in total. A smaller cache still works but is slower: the PLE n-gram table is
-spread over most shards and is converted last, so those shards stay cached until the end; once the
-cache is full, prefetching stops and downloads become serial.
+Streaming needs about 108 GB of output + the download cache (default 20 GB) + ~10 GB margin,
+**about 140 GB** in total. The cache only holds data the next jobs read, so a larger cache helps
+only when downloads are much faster than conversion.
 
 ### 4.2 Step 1: download the index (a few MB)
 
@@ -119,11 +123,11 @@ python -m tools.convert \
   --recipe qwen3_8_flash_next \
   --out models/qwen3_8_flash_next.ninfer \
   --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
-  --stream-budget-gb 80 \
+  --stream-budget-gb 20 \
   --max-file-bytes 250000000000
 ```
 
-- `--model` is the directory from step 1; shards are cached there too.
+- `--model` is the directory from step 1; downloaded ranges are cached in its `.stream/`.
 - `--max-file-bytes 250000000000` keeps a single output file. The default splits at 32 GB into
   `xxx.ninfer` + `xxx.ninfer.part-0001`, … (also fine; pass only the entry file to NInfer).
   To change the split of an existing artifact later (e.g. for upload limits), use
@@ -163,7 +167,7 @@ Set `MemoryMax` for your machine; Flash-Next converts within a 40G limit.
 
 ```bash
 du -h  models/.qwen3_8_flash_next.ninfer.*.tmp   # written so far; about 108 GB at the end
-du -sh models/flashnext-hf                       # shard cache
+du -sh models/flashnext-hf/.stream               # download cache
 ```
 
 On success the temporary file is renamed to `qwen3_8_flash_next.ninfer`, and
@@ -171,8 +175,8 @@ On success the temporary file is renamed to `qwen3_8_flash_next.ninfer`, and
 
 ### 4.6 After an interruption
 
-- Complete shards are reused and `.part` files resume where they stopped.
-- The output cannot be resumed; conversion restarts from job 1, and shards already deleted are
+- Complete ranges in `.stream/` are reused and `.part` files resume where they stopped.
+- The output cannot be resumed; conversion restarts from job 1, and ranges already deleted are
   downloaded again.
 - Remove the leftover temporary output first: `rm models/.qwen3_8_flash_next.ninfer.*.tmp`.
 - After success you may delete remaining `*.safetensors`/`*.part` in `models/flashnext-hf`; keep the
@@ -316,7 +320,7 @@ needs no calibration data.
 | `--rows-per-chunk` | 512 | Matrix rows processed at a time; lower it if memory is short |
 | `--max-file-bytes` | 32000000000 | Per-file limit in bytes; larger outputs split into `.part-000N` |
 | `--stream-url URL` | none | Streaming mode (needs `shard_headers.json` from `tools.convert.download`) |
-| `--stream-budget-gb` | 20 | Shard cache limit in GB; a shard the current job waits for may exceed it |
+| `--stream-budget-gb` | 20 | Download cache limit in GB; a range the current job waits for may exceed it |
 
 ---
 
@@ -400,7 +404,7 @@ Flash-Next only and runs slowly on the CPU; a few dozen `--tokens` is enough.
 | `shard_headers.json` not found | Run `tools.convert.download` first for streaming, or `--model` points elsewhere |
 | `model.safetensors.index.json not found` | Wrong URL or repository; `<prefix>config.json` should download in a browser |
 | `xxx.safetensors: download incomplete` | Repeated failures: a long network outage or a full disk. Check `df -h` and rerun (complete shards are reused) |
-| Downloads slow down and stay slow | The shard cache is full and downloads became serial; free space and raise `--stream-budget-gb` |
+| Downloads slow down and stay slow | The download cache is full of data for upcoming jobs, so the converter is the bottleneck; a larger `--stream-budget-gb` lets downloads run further ahead |
 | `... was released before a later read` | A shard was deleted too early (should not happen); delete that shard and rerun |
 | `bits must be one of 4, 5, 6, 8` | 1–3 bits are not supported; see [6.3](#63-why-there-are-no-1--2--or-3-bit-options) |
 | `CUDA out of memory` | Lower `--rows-per-chunk` (e.g. 128) or use `--device cpu` |
