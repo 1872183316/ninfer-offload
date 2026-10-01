@@ -781,6 +781,11 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
+| `--moe-offload` | keep routed MoE experts in host memory and compute them on CPU threads ([expert offload](maintainer/expert-offload.md)) | off |
+| `--moe-gpu-experts N` | experts per layer replicated on the GPU, ranked by `--moe-expert-stats` (else lowest ids) | `0` |
+| `--moe-threads N` | host expert threads; `0` selects the physical core count | `0` |
+| `--moe-expert-stats FILE` | per-layer routing counts that rank GPU-resident experts | unset |
+| `--moe-record-stats FILE` | write the observed routing counts at shutdown | unset |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--device-state-slots N` | extra Device checkpoint StateImages beyond the active-lane guarantee | `max-concurrency` |

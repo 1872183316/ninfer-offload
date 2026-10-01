@@ -2,6 +2,7 @@
 #include "serve/translate.h"
 
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -33,6 +34,19 @@ int main() {
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
+    failures += check(!defaults.moe_offload.enabled, "MoE offload is not disabled by default");
+    const ServeOptions offload =
+        parse({"ninfer-serve", "model.ninfer", "--moe-offload", "--moe-gpu-experts", "64",
+               "--moe-threads", "12", "--moe-expert-stats", "s.txt", "--moe-record-stats", "r.txt"});
+    failures += check(offload.moe_offload.enabled && offload.moe_offload.resident_experts == 64 &&
+                          offload.moe_offload.host_threads == 12 &&
+                          offload.moe_offload.expert_stats == "s.txt" &&
+                          offload.moe_offload.record_stats == "r.txt",
+                      "--moe-offload options were not parsed");
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--moe-gpu-experts", "64"});
+        failures += check(false, "--moe-gpu-experts without --moe-offload was accepted");
+    } catch (const std::invalid_argument&) {}
     failures += check(defaults.request_log_jsonl.empty(),
                       "request JSONL logging is not disabled by default");
     failures += check(defaults.context_cost_presets.empty(),
@@ -310,6 +324,8 @@ int main() {
                       "serve help omits --default-thinking-budget");
     failures += check(serve_usage_text("ninfer-serve").find("--vision") != std::string::npos,
                       "serve help omits --vision");
+    failures += check(serve_usage_text("ninfer-serve").find("--moe-offload") != std::string::npos,
+                      "serve help omits --moe-offload");
     failures +=
         check(serve_usage_text("ninfer-serve").find("--log-stats-interval-ms") != std::string::npos,
               "serve help omits --log-stats-interval-ms");

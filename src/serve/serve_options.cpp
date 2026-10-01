@@ -86,6 +86,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
+           "[--moe-offload [--moe-gpu-experts N] [--moe-threads N] [--moe-expert-stats FILE] "
+           "[--moe-record-stats FILE]] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
@@ -105,6 +107,12 @@ std::string serve_usage_text(const char* argv0) {
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
+           "       --moe-offload keeps routed MoE experts in host memory and computes them on CPU "
+           "threads;\n"
+           "       --moe-gpu-experts places N experts per layer on the GPU, ranked by "
+           "--moe-expert-stats\n"
+           "       (one line of per-expert routing counts per layer), else the lowest ids;\n"
+           "       --moe-record-stats writes the observed routing counts at shutdown\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
@@ -137,6 +145,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
     bool context_capacity_explicit   = false;
+    bool moe_option_explicit         = false;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -288,6 +297,22 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.enable_vision = true;
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
+        } else if (arg == "--moe-offload") {
+            options.moe_offload.enabled = true;
+        } else if (arg == "--moe-gpu-experts") {
+            options.moe_offload.resident_experts = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--moe-gpu-experts"), "moe-gpu-experts"));
+            moe_option_explicit = true;
+        } else if (arg == "--moe-threads") {
+            options.moe_offload.host_threads = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--moe-threads"), "moe-threads"));
+            moe_option_explicit = true;
+        } else if (arg == "--moe-expert-stats") {
+            options.moe_offload.expert_stats = require_value("--moe-expert-stats");
+            moe_option_explicit              = true;
+        } else if (arg == "--moe-record-stats") {
+            options.moe_offload.record_stats = require_value("--moe-record-stats");
+            moe_option_explicit              = true;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {
@@ -328,6 +353,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else {
             throw std::invalid_argument("unknown argument: " + arg);
         }
+    }
+    if (moe_option_explicit && !options.moe_offload.enabled) {
+        throw std::invalid_argument("--moe-* options require --moe-offload");
     }
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
