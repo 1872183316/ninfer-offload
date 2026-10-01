@@ -36,6 +36,8 @@ scoring use one transient progress line; redirected scoring emits persistent pro
 seconds. `--log-level debug` exposes internal startup and stream-begin detail. The final
 domain/overall table remains product output on stdout; the independent full-precision machine
 report is `report.json` under `profiles/perplexity/` unless `--output` supplies an empty directory.
+`--token-nll FILE` additionally writes one line per scored token (`stream-id target-index nll`)
+for per-token comparison against a reference implementation.
 
 For KV-format comparisons, the recommended long-context profile is the full corpus with
 `--context 65536 --stride 32768` and without `--quick`.

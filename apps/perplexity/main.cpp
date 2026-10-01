@@ -44,6 +44,7 @@ struct Options {
     std::optional<std::filesystem::path> corpus;
     std::optional<std::filesystem::path> text;
     std::optional<std::filesystem::path> output;
+    std::optional<std::filesystem::path> token_nll;
     std::uint32_t context               = 4096;
     std::uint32_t stride                = 2048;
     int device                          = 0;
@@ -57,7 +58,7 @@ std::string usage_text() {
     return "usage: ninfer-perplexity <model.ninfer> "
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N] [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--output <directory>]\n"
+           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--output <directory>] [--token-nll FILE]\n"
            "       [--moe-offload [--moe-gpu-experts N] [--moe-threads N] "
            "[--moe-expert-stats FILE]]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
@@ -131,6 +132,8 @@ Options parse_options(int argc, char** argv) {
             out.moe_offload.expert_stats = std::string(value("--moe-expert-stats"));
         } else if (option == "--output") {
             out.output = std::filesystem::path(value("--output"));
+        } else if (option == "--token-nll") {
+            out.token_nll = std::filesystem::path(value("--token-nll"));
         } else if (option == "--log-level") {
             out.log_level = ninfer::product::parse_log_level(value("--log-level"));
         } else {
@@ -273,6 +276,13 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
                  ninfer::product::format_pretty_count(total_scored_tokens),
                  ninfer::product::format_pretty_count(total_windows));
     Clock::time_point next_progress = scoring_started + std::chrono::seconds(10);
+    // One line per scored token: stream id, absolute target index, NLL (numerical comparison).
+    std::ofstream token_nll;
+    if (options.token_nll) {
+        token_nll.open(*options.token_nll);
+        if (!token_nll) { throw std::runtime_error("cannot write " + options.token_nll->string()); }
+        token_nll << std::setprecision(9);
+    }
     ScoreAggregate overall;
     std::map<std::string, ScoreAggregate> domains;
     json stream_reports             = json::array();
@@ -310,6 +320,12 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
             if (logprobs.size() != expected) {
                 throw std::runtime_error("scoring returned an invalid target count for " +
                                          stream.source.id);
+            }
+            if (token_nll.is_open()) {
+                for (std::size_t i = 0; i < logprobs.size(); ++i) {
+                    token_nll << stream.source.id << ' ' << window.target_begin + i << ' '
+                              << -static_cast<double>(logprobs[i]) << '\n';
+                }
             }
             ScoreAggregate window_score;
             window_score.add(logprobs);
