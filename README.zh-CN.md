@@ -45,6 +45,19 @@ x8）、Ubuntu、CUDA 12.8。贪心解码、BF16 KV、4 个提示词各跑 2 遍
 
 目前只在上面这一台机器上测试过。
 
+## 一条命令
+
+```bash
+./ninfer-run Qwen/Qwen3.8-Flash-Next          # 预编译包（v0.2.1 或更新）
+python -m tools.run Qwen/Qwen3.8-Flash-Next   # 源码目录
+```
+
+`ninfer-run` 会先找现成的 `.ninfer` 模型（下面的 Flash-Next 模型、NInfer 官方的 Qwen3.6/3.8 转换版），
+找不到时（仅源码目录）用官方配方流式转换原版权重；模型存放在 `~/ninfer-models`。它根据空闲显存和内存
+自动决定 `--moe-offload`、GPU 专家数、线程数和上下文长度，启动 `ninfer-serve` 后在终端里直接对话
+（`/think` 切换思考，`/reset` 清空，`/exit` 退出）。`--serve` 改为常驻 OpenAI/Anthropic 接口，
+`--prompt 文本` 只回答一次，`--dry-run` 只打印方案，`--` 之后的参数原样传给引擎。
+
 ## 快速开始：免编译、免转换
 
 预编译的 Linux 程序（RTX 40 系）在 [Releases 页面](https://github.com/1872183316/ninfer-offload/releases)

@@ -92,8 +92,11 @@ def same_disk(a: Path, b: Path) -> bool:
     return os.stat(existing(a)).st_dev == os.stat(existing(b)).st_dev
 
 
-def recipe_for(config: dict, repo: str) -> tuple[str, str | None]:
-    """Official recipe name and maintained chat template for a checkpoint config."""
+def recipe_for(config: dict, repo: str, interactive: bool = True) -> tuple[str, str | None]:
+    """Official recipe name and maintained chat template for a checkpoint config.
+
+    A dense checkpoint is Qwen3.6 or Qwen3.8; without `interactive` the repository name decides.
+    """
 
     if qwen4exp.is_qwen4exp(config):
         return "qwen3_8_flash_next", None
@@ -102,8 +105,8 @@ def recipe_for(config: dict, repo: str) -> tuple[str, str | None]:
         return "qwen3_6_35b_a3b", "tools/chat_templates/qwen3_6.jinja"
     guess = 2 if "3.8" in repo or "3_8" in repo else 1
     options = ["qwen3_6_27b (Qwen3.6 Dense)", "qwen3_8_27b (Qwen3.8 Dense)"]
-    if choose("Dense model: which official recipe? / Dense 模型使用哪个官方配方？",
-              options, guess) == 2:
+    if (choose("Dense model: which official recipe? / Dense 模型使用哪个官方配方？", options, guess)
+            if interactive else guess) == 2:
         return "qwen3_8_27b", "tools/chat_templates/qwen3_8.jinja"
     return "qwen3_6_27b", "tools/chat_templates/qwen3_6.jinja"
 

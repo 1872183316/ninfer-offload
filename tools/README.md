@@ -13,6 +13,7 @@ Python tools are independent of CMake; there is no `NINFER_BUILD_TOOLS` option.
 
 | Task | Location |
 |---|---|
+| Find, download or convert a model and chat with it in one command | [`run.py`](run.py) (`python -m tools.run MODEL`) |
 | Convert weights with an official or custom recipe | [`convert/`](convert/); [user guide](../docs/weight-conversion.md) |
 | Inspect artifact metadata and objects | [`artifact/inspect.py`](artifact/inspect.py) |
 | One-time upgrade of official v2 artifacts | [`upgrade_ninfer_v2_to_v3.py`](upgrade_ninfer_v2_to_v3.py), with positional `INPUT OUTPUT` paths |

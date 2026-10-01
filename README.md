@@ -48,6 +48,21 @@ this machine's RAM with llama.cpp.
 
 Only the machine above has been tested.
 
+### One command
+
+```bash
+./ninfer-run Qwen/Qwen3.8-Flash-Next          # prebuilt package (v0.2.1 or newer)
+python -m tools.run Qwen/Qwen3.8-Flash-Next   # source tree
+```
+
+`ninfer-run` finds a ready `.ninfer` conversion (the Flash-Next model below, the official NInfer
+Qwen3.6/3.8 conversions) or, from the source tree, converts the checkpoint with its official
+recipe by streaming; it stores models in `~/ninfer-models`, sizes `--moe-offload`, GPU experts,
+threads and context from free GPU and host memory, starts `ninfer-serve` and opens a terminal
+chat (`/think`, `/reset`, `/exit`). `--serve` keeps the OpenAI/Anthropic API running instead,
+`--prompt TEXT` answers once, `--dry-run` prints the plan, and arguments after `--` go to the
+engine unchanged.
+
 ### Quick start without building or converting
 
 Prebuilt Linux binaries (RTX 40-series) are on the
