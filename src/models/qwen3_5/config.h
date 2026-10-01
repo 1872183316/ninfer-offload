@@ -133,6 +133,11 @@ struct TextConfig {
     // Qwen4-Exp only.
     std::optional<HyperConnectionConfig> hyper;
     std::optional<IndexerConfig> indexer;
+
+    // QSA token selection runs when some query can see more tokens than the dense limit.
+    [[nodiscard]] bool qsa_active(std::uint32_t max_context) const noexcept {
+        return indexer && max_context > indexer->dense_visible_limit();
+    }
     std::optional<PleConfig> ple;
     bool gdn_sigmoid_gate = false;
 

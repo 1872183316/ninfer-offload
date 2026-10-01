@@ -93,7 +93,28 @@ void TextContext::qwen4exp_attention(const Qwen4AttentionParameters& p, const Te
     Tensor gh = gate.view({dim, heads, T});
     Tensor kh = k.view({dim, kv, T});
     Tensor vh = v.view({dim, kv, T});
-    Tensor o  = attention_core(p.query_norm, p.key_norm, qh, gh, kh, vh, fidx);
+    Tensor selected;
+    if (batch_text_kv_->has_index_planes()) {
+        // QSA: store the raw index keys, then select the attended blocks of every column.
+        const ops::QsaGeometry g = qsa_geometry();
+        const auto id            = dimension(g.index_dim);
+        const auto ih            = dimension(g.index_heads);
+        Tensor qk                = work_.alloc(DType::BF16, {(ih + 1) * id, T});
+        project(h, p.index_query_key, qk, work_, s);
+        const QsaRows rows = qsa_rows(T);
+        selected = work_.alloc(DType::I32, {dimension(g.block_topk), rows.positions.ne[0],
+                                            rows.positions.ne[1]});
+        Tensor pages       = batch_text_kv_->index_pages(static_cast<std::uint32_t>(fidx));
+        const Tensor tables = batch_text_kv_->batch_layer_view(fidx).block_tables;
+        ops::qsa_index_append(qk.slice(0, ih * id, id), rows.positions, rows.valid,
+                              rows.table_rows, tables, pages, s);
+        ops::qsa_select(qk.slice(0, 0, ih * id), p.index_query_norm, p.index_key_norm,
+                        rows.positions, rows.valid, rows.table_rows, tables, pages, g,
+                        active_causal_attention_envelope_->max_visible_keys, work_, selected, s);
+        active_qsa_selected_ = &selected;
+    }
+    Tensor o             = attention_core(p.query_norm, p.key_norm, qh, gh, kh, vh, fidx);
+    active_qsa_selected_ = nullptr;
     project(o.view({dim * heads, T}), p.output, y, work_, s);
 }
 

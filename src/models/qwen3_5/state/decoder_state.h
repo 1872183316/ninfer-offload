@@ -23,6 +23,8 @@ struct DecoderStateSpec {
     std::int32_t kv_table_rows              = 1;
     std::uint32_t text_physical_page_groups = 0;
     std::uint32_t mtp_physical_page_groups  = 0;
+    // Qwen4-Exp QSA: one BF16 [index_dim] raw index-key plane per Text attention layer; 0 = none.
+    std::int32_t index_dim = 0;
 };
 
 struct PagedKVCacheLayout {
@@ -32,6 +34,7 @@ struct PagedKVCacheLayout {
     std::uint32_t max_context = 0;
     std::int32_t kv_heads     = 0;
     PagedKVStorageLayout layer_storage;
+    std::int32_t index_dim = 0;
 
     [[nodiscard]] std::size_t payload_bytes() const noexcept { return pages.payload_bytes(); }
 };
@@ -82,6 +85,10 @@ public:
 
     [[nodiscard]] PagedKVBatchLayerView batch_layer_view(std::uint32_t layer) const;
 
+    // QSA raw index-key plane BF16 [index_dim,64,1,N] of a Text attention layer.
+    [[nodiscard]] bool has_index_planes() const noexcept { return index_dim_ != 0; }
+    [[nodiscard]] Tensor index_pages(std::uint32_t layer) const;
+
 private:
     friend class PagedKVCacheView;
     [[nodiscard]] PagedKVLayerView layer_view(std::uint32_t layer, Tensor block_table) const;
@@ -92,6 +99,7 @@ private:
     std::uint32_t max_context_ = 0;
     std::int32_t kv_heads_     = 0;
     PagedKVStorageLayout layer_storage_;
+    std::int32_t index_dim_ = 0;
 };
 
 struct DecoderStateLayout {

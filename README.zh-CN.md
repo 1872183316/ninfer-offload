@@ -13,8 +13,8 @@
 - **Qwen3.8-Flash-Next**（`Qwen4ExpForCausalLM`，1770 亿参数，其中 510 亿是 n-gram 嵌入表）：
   超连接残差流、PLE n-gram 注入（嵌入表通过内存映射放在主机上按需查表）、24 查询头 / 2 KV 头的
   注意力，以及 sigmoid 门控的 GatedDeltaNet。
-- **流式转换**：直接从 ModelScope / Hugging Face 边下载边转换，354 GB 的 BF16 原版模型只需约
-  80 GB 临时磁盘空间；以及用于数值校验的**独立 FP32 参考实现**
+- **流式转换**：直接从 ModelScope / Hugging Face 边下载边转换，354 GB 的 BF16 原版模型除输出文件外
+  只需约 20 GB 下载缓存；以及用于数值校验的**独立 FP32 参考实现**
   （`tools/validate/qwen4exp_reference.py`）。
 
 分支相关的设计、限制、校验和测速细节见
@@ -71,7 +71,7 @@ python -m tools.convert.download https://modelscope.cn/models/Qwen/Qwen3.8-Flash
 # 边下载边转换（按 15 MB/s 约需 8 小时）
 python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out qwen3_8_flash_next.ninfer \
   --device cuda --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
-  --stream-budget-gb 80 --max-file-bytes 250000000000
+  --stream-budget-gb 20 --max-file-bytes 250000000000
 
 ./build-sm89/apps/ninfer qwen3_8_flash_next.ninfer --prompt "你好" --no-thinking \
   --max-context 2048 --kv-capacity 2048 \
@@ -80,8 +80,21 @@ python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out q
 
 两种转换方式、精度选择、磁盘需求和排错见[转换器使用说明](tools/convert/README.zh-CN.md)。
 
-目前 Flash-Next 的上下文最长 2051 个 token（QSA 的 token 选择还没实现），也还没有实现 MTP /
-投机解码。`bench/offload/` 里有测速和校准脚本。
+上下文超过 2051 个 token 时使用模型自带的 QSA token 选择（每个查询只看得分最高的 512 个 4-token
+块和最近的尾部 token），要求 `--kv-dtype bf16`（默认值）且只支持纯文本输入；2051 以内仍是原来的
+稠密注意力。Flash-Next 还没有实现 MTP / 投机解码。`bench/offload/` 里有测速和校准脚本。
+
+兼容 OpenAI / Anthropic 接口的服务端也支持同样的卸载参数（当前源码；v0.1.1 预编译包里还没有）：
+
+```bash
+./build-sm89/apps/ninfer-serve qwen3_8_flash_next.ninfer --port 8080 \
+  --max-context 8192 --host-kv-mib 1024 \
+  --moe-offload --moe-threads 12 --moe-gpu-experts 64 \
+  --moe-expert-stats "$PWD/bench/offload/stats_flash_next.txt"
+```
+
+`--host-kv-mib 1024` 把前缀缓存用的锁页内存从默认 8 GiB 降下来，给常驻主机内存的专家权重和
+n-gram 表（约 70 GB）留出空间。
 
 ## 许可证
 

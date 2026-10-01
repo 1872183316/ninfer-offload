@@ -118,9 +118,17 @@ public:
                                     native_weight(model_.weight(p.table).view)};
         }
         if (const auto* a = std::get_if<AttentionWeights>(&w.mixer)) {
-            out.mixer = Qwen4AttentionParameters{
-                linear(a->query),     linear(a->key),       linear(a->gate), linear(a->value),
-                linear(a->output),    tensor(a->query_norm), tensor(a->key_norm)};
+            const IndexerWeights& ix = *w.indexer;
+            out.mixer                = Qwen4AttentionParameters{linear(a->query),
+                                                                linear(a->key),
+                                                                linear(a->gate),
+                                                                linear(a->value),
+                                                                linear(a->output),
+                                                                tensor(a->query_norm),
+                                                                tensor(a->key_norm),
+                                                                linear(ix.query_key),
+                                                                tensor(ix.query_norm),
+                                                                tensor(ix.key_norm)};
         } else {
             const auto& g = std::get<GdnWeights>(w.mixer);
             const std::array qkv{model_.input(g.query), model_.input(g.key), model_.input(g.value)};

@@ -8,6 +8,7 @@
 #include "core/linear_attention_state.h"
 #include "core/tensor.h"
 #include "core/weight.h"
+#include "ninfer/ops/qsa.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/softmax_attention.h"
 #include "ninfer/ops/sparse_moe.h"
@@ -173,6 +174,12 @@ private:
                    Tensor* injection);
     void qwen4exp_attention(const Qwen4AttentionParameters& weights, const Tensor& h, Tensor& y,
                             int index);
+    // Cache positions [W,B], valid columns and table rows of the active call for the QSA Ops.
+    struct QsaRows {
+        Tensor positions, valid, table_rows;
+    };
+    [[nodiscard]] QsaRows qsa_rows(std::int32_t columns) const;
+    [[nodiscard]] ops::QsaGeometry qsa_geometry() const;
     void qwen4exp_gdn(const Qwen4GdnParameters& weights, const Tensor& h, Tensor& y, int index,
                       Phase phase);
     void qwen4exp_ple(const PleParameters& weights, Tensor& wide, Phase phase);
@@ -248,6 +255,8 @@ private:
     const Tensor* active_ids_                                                      = nullptr;
     const Tensor* active_backend_kv_table_rows_                                    = nullptr;
     const ops::CausalAttentionExecutionEnvelope* active_causal_attention_envelope_ = nullptr;
+    // Set while a Qwen4-Exp attention layer runs QSA: its selected blocks [512,W,B].
+    const Tensor* active_qsa_selected_                                             = nullptr;
     std::int32_t active_sequence_batch_                                            = 0;
     std::int32_t active_sequence_width_                                            = 0;
     std::int32_t rope_delta_                                                       = 0;

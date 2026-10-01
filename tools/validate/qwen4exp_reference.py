@@ -104,7 +104,9 @@ def rms(x: torch.Tensor, w: torch.Tensor | None, eps: float, offset: bool = True
 
 
 class Model:
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, dense_attention: bool = False) -> None:
+        # dense_attention disables QSA token selection (exact only up to the dense limit).
+        self.dense_attention = dense_attention
         self.artifact = Artifact.open(path)
         self.w = Weights(self.artifact)
         components = self.artifact.directory.components
@@ -214,10 +216,55 @@ class Model:
         k = k.repeat_interleave(nh // kv, dim=1)
         v = v.repeat_interleave(nh // kv, dim=1)
         scores = torch.einsum("thd,shd->hts", q, k) / math.sqrt(d)
-        scores = scores.masked_fill(torch.triu(torch.ones(T, T, dtype=torch.bool), 1), -math.inf)
+        visible = torch.tril(torch.ones(T, T, dtype=torch.bool))
+        if not self.dense_attention:
+            visible &= self.qsa_mask(prefix, h, inv)
+        scores = scores.masked_fill(~visible, -math.inf)
         o = torch.einsum("hts,shd->thd", scores.softmax(-1), v).reshape(T, nh * d)
         o = o * torch.sigmoid(gate)
         return o @ self.w.get(prefix + "attention/output", (H, nh * d)).T
+
+    def qsa_mask(self, prefix: str, h: torch.Tensor, inv: torch.Tensor) -> torch.Tensor:
+        """Tokens selected by the QSA indexer (reference Qwen4ExpTextQSAIndexer) as [T,T]."""
+        c = self.cfg
+        H, eps, T = c["hidden_size"], c["rms_norm_eps"], h.shape[0]
+        nh, d = c["indexer_n_heads"], c["indexer_head_dim"]
+        ratio = c["indexer_compress_ratio"]
+        topk = c["indexer_budget"] // ratio
+        qk = h @ self.w.get(prefix + "indexer/query_key", ((nh + 1) * d, H)).T
+        q = rms(qk[:, :nh * d].view(T, nh, d), self.w.get(prefix + "indexer/query_norm", (d,)), eps)
+        raw = qk[:, nh * d:]
+        rot = 2 * inv.numel()
+
+        def rope(x, pos):
+            ang = pos.double()[:, None] * inv[None, :]
+            cos = torch.cat([ang.cos(), ang.cos()], -1).float()
+            sin = torch.cat([ang.sin(), ang.sin()], -1).float()
+            if x.dim() == 3:
+                cos, sin = cos[:, None, :], sin[:, None, :]
+            xr, xp = x[..., :rot], x[..., rot:]
+            half = torch.cat([-xr[..., rot // 2:], xr[..., :rot // 2]], -1)
+            return torch.cat([xr * cos + half * sin, xp], -1)
+
+        q = rope(q, torch.arange(T))
+        blocks = T // ratio
+        mask = torch.zeros(T, T, dtype=torch.bool)
+        if blocks == 0:
+            return mask | True
+        pooled = raw[: blocks * ratio].view(blocks, ratio, d).mean(1)
+        keys = rope(rms(pooled, self.w.get(prefix + "indexer/key_norm", (d,)), eps),
+                    torch.arange(blocks) * ratio)
+        scores = torch.relu(torch.einsum("thd,bd->tbh", q, keys)).sum(-1) / math.sqrt(d)
+        for t in range(T):
+            nb = (t + 1) // ratio
+            if nb <= topk:
+                mask[t, : t + 1] = True
+                continue
+            chosen = scores[t, :nb].topk(topk).indices
+            tokens = (chosen[:, None] * ratio + torch.arange(ratio)[None, :]).flatten()
+            mask[t, tokens] = True
+            mask[t, nb * ratio: t + 1] = True
+        return mask
 
     def gdn(self, prefix: str, h: torch.Tensor) -> torch.Tensor:
         c = self.cfg
@@ -275,11 +322,10 @@ class Model:
             gate = self.w.get(ep + "gate", (I, H), cache=False)
             up = self.w.get(ep + "up", (I, H), cache=False)
             down = self.w.get(ep + "down", (H, I), cache=False)
-            for t in range(h.shape[0]):
-                hit = (ids[t] == e).nonzero()
-                if hit.numel():
-                    y = (F.silu(h[t] @ gate.T) * (h[t] @ up.T)) @ down.T
-                    out[t] += top[t, hit[0, 0]] * y
+            rows, slots = (ids == e).nonzero(as_tuple=True)
+            x = h[rows]
+            y = (F.silu(x @ gate.T) * (x @ up.T)) @ down.T
+            out.index_add_(0, rows, top[rows, slots][:, None] * y)
         shared = (F.silu(h @ self.w.get(p + "shared/gate", (Is, H)).T) *
                   (h @ self.w.get(p + "shared/up", (Is, H)).T)) @ self.w.get(p + "shared/down", (H, Is)).T
         score = torch.sigmoid(h @ self.w.get(p + "shared_score", (1, H)).T)
@@ -314,6 +360,8 @@ def main() -> None:
     parser.add_argument("--text", required=True)
     parser.add_argument("--tokens", type=int, default=32)
     parser.add_argument("--generate", type=int, default=0)
+    parser.add_argument("--dense-attention", action="store_true",
+                        help="attend to every causal token instead of the QSA selection")
     parser.add_argument("--continuation", default="",
                         help="space-separated token ids appended after the text (teacher forcing); "
                              "reports whether each is the reference argmax")
@@ -325,7 +373,7 @@ def main() -> None:
     prompt_tokens = len(ids)
     ids += [int(t) for t in args.continuation.split()]
     torch.set_num_threads(12)
-    model = Model(args.artifact)
+    model = Model(args.artifact, dense_attention=args.dense_attention)
     with torch.no_grad():
         logits = model.forward(ids).double()
         logp = logits.log_softmax(-1)

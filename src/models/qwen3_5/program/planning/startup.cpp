@@ -17,6 +17,7 @@
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
+#include "ninfer/ops/qsa.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/sliding_window_attention.h"
 #include "ninfer/ops/softmax_attention.h"
@@ -135,6 +136,9 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                      .kv_table_rows             = static_cast<std::int32_t>(plan.max_concurrency),
                      .text_physical_page_groups = physical_pages,
                      .mtp_physical_page_groups  = mtp_physical_pages,
+                     .index_dim = config.qsa_active(plan.capacity)
+                                      ? dimension(config.indexer->head_dim)
+                                      : 0,
                  });
     qwen3_5::StateImageSpec state_image_spec{
         .linear =
@@ -358,7 +362,28 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     for (const auto* w : {&a->query, &a->gate, &a->key, &a->value}) {
                         linear_scratch(layout, *w, first, last);
                     }
+                    if (config.qsa_active(plan.capacity)) {
+                        const auto& ix = *config.indexer;
+                        const ops::QsaGeometry geometry{
+                            .index_heads = dimension(ix.heads),
+                            .index_dim   = dimension(ix.head_dim),
+                            .rotary_dim  = dimension(config.rope_parameters->rotary_dim),
+                            .compress    = dimension(ix.compress_ratio),
+                            .block_topk  = dimension(ix.budget / ix.compress_ratio),
+                            .theta       = config.rope_parameters->rope_theta,
+                            .eps         = config.rms_norm_eps,
+                        };
+                        matrix(layout, DType::BF16, dimension((ix.heads + 1) * ix.head_dim), last);
+                        linear_scratch(layout, a->index_query_key, first, last);
+                        matrix(layout, DType::I32, geometry.block_topk, last);
+                        scratch(layout, ops::qsa_select_workspace_bytes(
+                                            geometry, envelope.max_visible_keys,
+                                            std::max(batch_size, 1), std::max(last, 1)));
+                    }
                     (void)workspace::text_attention_results(layout, config, last);
+                    if (config.qsa_active(plan.capacity)) {
+                        scratch(layout, ops::qsa_attention_workspace_bytes(std::max(last, 1)));
+                    }
                     scratch(layout,
                             ops::causal_softmax_attention_workspace_capacity_bytes(
                                 {dimension(config.attention->head_dim),
@@ -849,12 +874,19 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         throw std::invalid_argument("max_context exceeds the configured position capacity");
     }
     if (const auto& text = parameters.model.config().text; text.indexer) {
-        // Without the QSA indexer the attention is exact only while every visible token is
-        // selected.
-        if (options.max_context > text.indexer->dense_visible_limit()) {
-            throw std::invalid_argument("Qwen4-Exp max_context must not exceed " +
-                                        std::to_string(text.indexer->dense_visible_limit()) +
-                                        " (QSA token selection is not implemented)");
+        // Up to the dense limit every visible token is selected and dense causal attention is
+        // exact; beyond it QSA token selection runs over the BF16 cache with text positions.
+        if (text.qsa_active(options.max_context)) {
+            if (options.kv_cache != KvCacheStorage::BFloat16) {
+                throw std::invalid_argument("Qwen4-Exp max_context above " +
+                                            std::to_string(text.indexer->dense_visible_limit()) +
+                                            " (QSA) requires --kv-dtype bf16");
+            }
+            if (options.enable_vision) {
+                throw std::invalid_argument("Qwen4-Exp max_context above " +
+                                            std::to_string(text.indexer->dense_visible_limit()) +
+                                            " (QSA) supports text input only");
+            }
         }
         if (parameters.model.options().speculative != SpeculativeBackend::None) {
             throw std::invalid_argument("Qwen4-Exp does not implement speculative decoding");

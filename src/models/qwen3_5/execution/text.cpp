@@ -866,7 +866,22 @@ Tensor TextContext::attention_core(const Tensor& query_norm, const Tensor& key_n
                                        dimension(config_.attention->num_attention_heads), T});
     const Tensor& kv_table_rows =
         active_kv_table_rows_ != nullptr ? *active_kv_table_rows_ : io_.text_kv_table_row;
-    if (active_sequence_batch_ != 0) {
+    if (active_qsa_selected_ != nullptr) {
+        const QsaRows rows = qsa_rows(T);
+        const int width    = rows.positions.ne[0];
+        const int batch    = rows.positions.ne[1];
+        const auto d       = dimension(config_.attention->head_dim);
+        Tensor q4          = qn.view({d, dimension(config_.attention->num_attention_heads), width,
+                                      batch});
+        Tensor k4 = kn.view({d, dimension(config_.attention->num_key_value_heads), width, batch});
+        Tensor v4 = v.view({d, dimension(config_.attention->num_key_value_heads), width, batch});
+        Tensor a4 = a.view({d, dimension(config_.attention->num_attention_heads), width, batch});
+        ops::qsa_attention(
+            q4, k4, v4, rows.positions, rows.valid, rows.table_rows, *active_qsa_selected_,
+            qsa_geometry(),
+            static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
+            batch_text_kv_->batch_layer_view(fidx), work_, a4, s);
+    } else if (active_sequence_batch_ != 0) {
         const std::int32_t width = active_sequence_width_;
         if (width <= 0 || width * active_sequence_batch_ != T) {
             throw std::logic_error("Text sequence batch binding does not match aggregate columns");
@@ -905,6 +920,32 @@ Tensor TextContext::attention_core(const Tensor& query_norm, const Tensor& key_n
     }
     ops::sigmoid_mul(gate, a, s);
     return a;
+}
+
+TextContext::QsaRows TextContext::qsa_rows(std::int32_t columns) const {
+    const Tensor& cache_positions =
+        active_cache_positions_ != nullptr ? *active_cache_positions_ : io_.pos;
+    const Tensor& kv_table_rows =
+        active_kv_table_rows_ != nullptr ? *active_kv_table_rows_ : io_.text_kv_table_row;
+    if (active_sequence_batch_ != 0) {
+        return QsaRows{cache_positions.view({active_sequence_width_, active_sequence_batch_}),
+                       active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{},
+                       kv_table_rows.view({active_sequence_batch_})};
+    }
+    return QsaRows{cache_positions.view({columns, 1}), Tensor{}, kv_table_rows.view({1})};
+}
+
+ops::QsaGeometry TextContext::qsa_geometry() const {
+    const auto& ix = *config_.indexer;
+    return ops::QsaGeometry{
+        .index_heads = dimension(ix.heads),
+        .index_dim   = dimension(ix.head_dim),
+        .rotary_dim  = dimension(config_.rope_parameters->rotary_dim),
+        .compress    = dimension(ix.compress_ratio),
+        .block_topk  = dimension(ix.budget / ix.compress_ratio),
+        .theta       = config_.rope_parameters->rope_theta,
+        .eps         = config_.rms_norm_eps,
+    };
 }
 
 void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase ph) {

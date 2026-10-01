@@ -48,6 +48,9 @@ struct GdnParameters {
 struct Qwen4AttentionParameters {
     LinearParameters query, key, gate, value, output;
     Tensor query_norm, key_norm;
+    // QSA indexer: query|key projection [(heads+1)*head_dim, H] and per-head norms.
+    LinearParameters index_query_key;
+    Tensor index_query_norm, index_key_norm;
 };
 
 struct Qwen4GdnParameters {

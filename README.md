@@ -15,7 +15,7 @@ This fork adds, on top of upstream NInfer (`e31bc99b`):
   hyper-connection residual streams, the PLE n-gram injection with a host-mapped table, the
   24-query/2-KV attention geometry and the sigmoid-gated GatedDeltaNet.
 - **Streaming conversion** from ModelScope/Hugging Face shards (the 354 GB BF16 checkpoint is
-  converted with ~80 GB of scratch disk) and an **independent FP32 reference**
+  converted with a 20 GB download cache besides the output) and an **independent FP32 reference**
   (`tools/validate/qwen4exp_reference.py`) for numerical validation.
 
 Everything in the rest of this README describes upstream NInfer; the fork-specific design,
@@ -74,7 +74,7 @@ python -m tools.convert.wizard
 python -m tools.convert.download https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ flashnext-hf
 python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out qwen3_8_flash_next.ninfer \
   --device cuda --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
-  --stream-budget-gb 80 --max-file-bytes 250000000000
+  --stream-budget-gb 20 --max-file-bytes 250000000000
 
 ./build-sm89/apps/ninfer qwen3_8_flash_next.ninfer --prompt "Hello" --no-thinking \
   --max-context 2048 --kv-capacity 2048 \
@@ -84,9 +84,23 @@ python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out q
 The [converter guide](tools/convert/README.md) covers both conversion modes, precision choices,
 disk requirements and troubleshooting.
 
-Flash-Next contexts are limited to 2051 tokens (QSA token selection is not implemented yet), and
-MTP/speculative decoding is not implemented for it. `bench/offload/` holds the evaluation and
-calibration scripts.
+Contexts above 2051 tokens use the model's QSA token selection (each query attends to its 512
+highest-scoring 4-token blocks plus the recent tail) and require `--kv-dtype bf16` (the default)
+and text-only input; up to 2051 tokens attention is dense and unchanged. MTP/speculative decoding is
+not implemented for Flash-Next. `bench/offload/` holds the evaluation and calibration scripts.
+
+The OpenAI/Anthropic-compatible server accepts the same offload options (current source; not in
+the v0.1.1 binaries):
+
+```bash
+./build-sm89/apps/ninfer-serve qwen3_8_flash_next.ninfer --port 8080 \
+  --max-context 8192 --host-kv-mib 1024 \
+  --moe-offload --moe-threads 12 --moe-gpu-experts 64 \
+  --moe-expert-stats "$PWD/bench/offload/stats_flash_next.txt"
+```
+
+`--host-kv-mib 1024` keeps the pinned prefix-cache arena small (default 8 GiB) next to the ~70 GB
+of host-resident experts and n-gram table.
 
 ---
 

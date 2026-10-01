@@ -101,6 +101,10 @@ ninfer_add_op_test(ninfer_hyper_connection_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_hyper_connection.cpp"
   LIBRARIES ninfer_ops)
 
+ninfer_add_op_test(ninfer_qsa_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_qsa.cpp"
+  LIBRARIES ninfer_ops)
+
 ninfer_add_op_test(ninfer_hybrid_sparse_moe_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_hybrid_sparse_moe.cpp"
   LIBRARIES ninfer_ops)

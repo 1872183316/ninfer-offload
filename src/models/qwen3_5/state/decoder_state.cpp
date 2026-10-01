@@ -14,10 +14,11 @@ std::uint32_t page_count(std::uint32_t capacity) {
 
 PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std::uint32_t capacity,
                               std::int32_t kv_heads, std::int32_t head_dim, KvCacheStorage storage,
-                              std::int32_t table_rows, std::uint32_t physical_page_groups) {
+                              std::int32_t table_rows, std::uint32_t physical_page_groups,
+                              std::int32_t index_dim) {
     if (layers == 0 ||
         layers > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
-        kv_heads <= 0 || head_dim <= 0 || table_rows <= 0) {
+        kv_heads <= 0 || head_dim <= 0 || table_rows <= 0 || index_dim < 0) {
         throw std::invalid_argument("Paged KV cache geometry is invalid");
     }
     const PagedKVStorageLayout layer_storage = paged_kv_storage_layout(storage, head_dim);
@@ -43,6 +44,10 @@ PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std:
                                        layer_storage.value.scale_leading_extent, kv_heads, 256});
         }
     }
+    // Index planes follow every K/V plane so that K/V plane ordinals keep their stride.
+    for (std::uint32_t layer = 0; index_dim != 0 && layer < layers; ++layer) {
+        geometry.planes.push_back({DType::BF16, index_dim, 1, 256});
+    }
     return PagedKVCacheLayout{
         .pages = plan_device_kv_page_pool(
             builder, DeviceKVPagePoolSpec{.page_group_count = physical_page_groups,
@@ -54,6 +59,7 @@ PagedKVCacheLayout plan_cache(LayoutBuilder& builder, std::uint32_t layers, std:
         .max_context   = capacity,
         .kv_heads      = kv_heads,
         .layer_storage = layer_storage,
+        .index_dim     = index_dim,
     };
 }
 
@@ -63,11 +69,11 @@ DecoderStateLayout plan_decoder_state(LayoutBuilder& builder, const DecoderState
     DecoderStateLayout layout;
     layout.text_kv = plan_cache(builder, spec.full_attention_layers, spec.capacity, spec.kv_heads,
                                 spec.attention_head_dim, spec.kv_storage, spec.kv_table_rows,
-                                spec.text_physical_page_groups);
+                                spec.text_physical_page_groups, spec.index_dim);
     if (spec.enable_mtp) {
         layout.mtp_kv = plan_cache(builder, spec.mtp_layers, spec.capacity, spec.kv_heads,
                                    spec.attention_head_dim, spec.kv_storage, spec.kv_table_rows,
-                                   spec.mtp_physical_page_groups);
+                                   spec.mtp_physical_page_groups, 0);
     }
     return layout;
 }
@@ -75,9 +81,9 @@ DecoderStateLayout plan_decoder_state(LayoutBuilder& builder, const DecoderState
 PagedKVCache::PagedKVCache(DeviceSpan backing, const PagedKVCacheLayout& layout)
     : pages_(backing, layout.pages), execution_tables_(backing, layout.execution_tables, pages_),
       layers_(layout.layers), max_context_(layout.max_context), kv_heads_(layout.kv_heads),
-      layer_storage_(layout.layer_storage) {
-    if (pages_.plane_count() !=
-        static_cast<std::size_t>(layers_) * layer_storage_.planes_per_layer()) {
+      layer_storage_(layout.layer_storage), index_dim_(layout.index_dim) {
+    if (pages_.plane_count() != static_cast<std::size_t>(layers_) *
+                                    (layer_storage_.planes_per_layer() + (index_dim_ != 0))) {
         throw std::invalid_argument("Paged KV layer plane inventory is inconsistent");
     }
 }
@@ -118,6 +124,13 @@ PagedKVLayerView PagedKVCache::layer_view(std::uint32_t layer, Tensor block_tabl
         .num_kv_heads  = kv_heads_,
         .storage       = layer_storage_.storage,
     };
+}
+
+Tensor PagedKVCache::index_pages(std::uint32_t layer) const {
+    if (index_dim_ == 0) { throw std::logic_error("Paged KV cache has no QSA index planes"); }
+    if (layer >= layers_) { throw std::out_of_range("Paged KV layer is out of range"); }
+    return pages_.plane(static_cast<std::size_t>(layers_) * layer_storage_.planes_per_layer() +
+                        layer);
 }
 
 PagedKVBatchLayerView PagedKVCache::batch_layer_view(std::uint32_t layer) const {
