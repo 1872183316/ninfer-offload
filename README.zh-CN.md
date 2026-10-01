@@ -48,7 +48,7 @@ x8）、Ubuntu、CUDA 12.8。贪心解码、BF16 KV、4 个提示词各跑 2 遍
 ## 快速开始：免编译、免转换
 
 预编译的 Linux 程序（RTX 40 系）在 [Releases 页面](https://github.com/1872183316/ninfer-offload/releases)
-（需 v0.1.1 或更新），转换好的 Flash-Next 模型（108 GB，3 个文件）在 ModelScope：
+（长上下文和 API 服务需 v0.2.0 或更新），转换好的 Flash-Next 模型（108 GB，3 个文件）在 ModelScope：
 [mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload](https://modelscope.cn/models/mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload)。
 
 ```bash
@@ -84,7 +84,7 @@ python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out q
 块和最近的尾部 token），要求 `--kv-dtype bf16`（默认值）且只支持纯文本输入；2051 以内仍是原来的
 稠密注意力。Flash-Next 还没有实现 MTP / 投机解码。`bench/offload/` 里有测速和校准脚本。
 
-兼容 OpenAI / Anthropic 接口的服务端也支持同样的卸载参数（当前源码；v0.1.1 预编译包里还没有）：
+兼容 OpenAI / Anthropic 接口的服务端也支持同样的卸载参数（需 v0.2.0 或更新）：
 
 ```bash
 ./build-sm89/apps/ninfer-serve qwen3_8_flash_next.ninfer --port 8080 \

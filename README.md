@@ -51,7 +51,7 @@ Only the machine above has been tested.
 ### Quick start without building or converting
 
 Prebuilt Linux binaries (RTX 40-series) are on the
-[releases page](https://github.com/1872183316/ninfer-offload/releases) (v0.1.1 or newer), and the
+[releases page](https://github.com/1872183316/ninfer-offload/releases) (v0.2.0 or newer for long contexts and the API server), and the
 converted Flash-Next model (108 GB, three files) is on ModelScope:
 [mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload](https://modelscope.cn/models/mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload).
 
@@ -89,8 +89,7 @@ highest-scoring 4-token blocks plus the recent tail) and require `--kv-dtype bf1
 and text-only input; up to 2051 tokens attention is dense and unchanged. MTP/speculative decoding is
 not implemented for Flash-Next. `bench/offload/` holds the evaluation and calibration scripts.
 
-The OpenAI/Anthropic-compatible server accepts the same offload options (current source; not in
-the v0.1.1 binaries):
+The OpenAI/Anthropic-compatible server accepts the same offload options (v0.2.0 or newer):
 
 ```bash
 ./build-sm89/apps/ninfer-serve qwen3_8_flash_next.ninfer --port 8080 \
