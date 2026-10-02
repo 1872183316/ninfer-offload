@@ -51,8 +51,8 @@ The wizard asks a few questions; pressing Enter accepts each default:
 1. **Where the original weights are**: ModelScope, HuggingFace (or a mirror), or already on disk.
 2. **How to read them** (online models): streaming (download while converting; least disk) or
    download everything first.
-3. It detects the architecture and picks the official recipe; for regular Qwen3.6/3.8 models it
-   also asks whether to include vision and MTP.
+3. It detects the architecture and picks the official recipe, and asks whether to include MTP
+   (speculative decoding; also for Flash-Next) and, for models with a vision tower, vision.
 4. **Output precision**: several presets with their estimated file sizes, or custom bits per
    weight class (see [section 6](#6-choosing-the-precision-bits)).
 5. The output path. The wizard checks free disk space and says how much is missing.
@@ -121,6 +121,7 @@ The URL is the prefix from which single files can be downloaded, ending in `/`:
 python -m tools.convert \
   --model models/flashnext-hf \
   --recipe qwen3_8_flash_next \
+  --components text,mtp \
   --out models/qwen3_8_flash_next.ninfer \
   --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
   --stream-budget-gb 20 \
@@ -132,7 +133,8 @@ python -m tools.convert \
   `xxx.ninfer` + `xxx.ninfer.part-0001`, … (also fine; pass only the entry file to NInfer).
   To change the split of an existing artifact later (e.g. for upload limits), use
   `python -m tools.artifact.reshard xxx.ninfer out/xxx.ninfer --max-file-gb 50`; do not use `split`.
-- Flash-Next currently supports only the `text` component; do not add `mtp`/`vision` or `--proposal`.
+- Add `--components text,mtp` to include the MTP predictor for speculative decoding (1.5 GB more;
+  the ModelScope conversion includes it). Flash-Next has no `vision` component or `--proposal`.
 - Add `--dry-run` to print each weight class's format and the estimated size without downloading
   or converting anything.
 

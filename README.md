@@ -89,7 +89,7 @@ python -m tools.convert.wizard
 # ...or directly: stream the official BF16 checkpoint (about 8 hours at 15 MB/s).
 python -m tools.convert.download https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ flashnext-hf
 python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out qwen3_8_flash_next.ninfer \
-  --device cuda --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
+  --components text,mtp --device cuda --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
   --stream-budget-gb 20 --max-file-bytes 250000000000
 
 ./build-sm89/apps/ninfer qwen3_8_flash_next.ninfer --prompt "Hello" --no-thinking \

@@ -191,6 +191,8 @@ def convert(checkpoint: Path, url: str | None, repo: str, target: Path, budget_g
         command += ["--resource", f"chat_template.jinja={ROOT / template}"]
     if recipe in ("qwen3_6_27b", "qwen3_8_27b"):
         command.append("--proposal")
+    if recipe == "qwen3_8_flash_next":
+        command += ["--components", "text,mtp"]
     if url:
         command += ["--stream-url", url, "--stream-budget-gb", str(budget_gb)]
     log(f"converting with recipe {recipe} (this can take hours; rerun resumes downloads)")

@@ -192,12 +192,11 @@ def main() -> None:
     recipe_name, template = recipe_for(config, repo)
     print(f"\nDetected recipe / 识别到的配方: {recipe_name}")
     components = ["text"]
-    if recipe_name != "qwen3_8_flash_next":
-        if config.get("vision_config") and yes(
-                "Include vision (image/video input)? / 包含视觉（图片视频输入）？", False):
-            components.append("vision")
-        if yes("Include MTP (speculative decoding, faster)? / 包含 MTP（投机解码，更快）？", True):
-            components.append("mtp")
+    if recipe_name != "qwen3_8_flash_next" and config.get("vision_config") and yes(
+            "Include vision (image/video input)? / 包含视觉（图片视频输入）？", False):
+        components.append("vision")
+    if yes("Include MTP (speculative decoding, faster)? / 包含 MTP（投机解码，更快）？", True):
+        components.append("mtp")
     components = tuple(components)
 
     print("\nEstimating sizes (reads headers only) ... / 正在估算大小（只读文件头）……")

@@ -50,7 +50,7 @@ python -m tools.convert.wizard
 
 1. **原版权重在哪里**：ModelScope、HuggingFace（或镜像站），还是已经下载到本机。
 2. **如何读取**（在线模型）：流式（边下载边转换，占用磁盘最少）或先完整下载再转换。
-3. 自动识别模型架构并选用对应的官方配方；Qwen3.6/3.8 普通模型会再问是否包含视觉、MTP。
+3. 自动识别模型架构并选用对应的官方配方，再问是否包含 MTP（投机解码，Flash-Next 也支持）；带视觉部分的模型还会问是否包含视觉。
 4. **输出精度**：列出几个预设及各自的预计文件大小，也可以自定义每类权重的位数（见[第 6 节](#6-选择精度位数)）。
 5. 输出文件路径；向导检查磁盘空间，空间不够会直接说明缺多少。
 6. 显示将要执行的完整命令，然后选择**立即运行**，或**保存为脚本**（适合放进 tmux/systemd 长时间运行）。
@@ -109,6 +109,7 @@ URL 必须是“可以直接下载单个文件的前缀”，以 `/` 结尾：
 python -m tools.convert \
   --model models/flashnext-hf \
   --recipe qwen3_8_flash_next \
+  --components text,mtp \
   --out models/qwen3_8_flash_next.ninfer \
   --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
   --stream-budget-gb 20 \
@@ -120,7 +121,8 @@ python -m tools.convert \
   `xxx.ninfer` + `xxx.ninfer.part-0001` … 多个文件（同样可用，运行时只传入口文件）。
   之后想改变已有模型的分片大小（例如为了满足上传限制），用
   `python -m tools.artifact.reshard xxx.ninfer out/xxx.ninfer --max-file-gb 50`，不要用 `split` 切。
-- Flash-Next 目前只支持 `text` 组件；不要加 `--components mtp/vision` 或 `--proposal`。
+- 加 `--components text,mtp` 会同时转换 MTP 预测层，用于投机解码（多 1.5 GB；ModelScope 上的转换已包含）。
+  Flash-Next 没有 `vision` 组件，也不支持 `--proposal`。
 - 想先看看结果多大：加 `--dry-run`，只打印每类权重的格式和预计大小，不下载、不转换。
 
 ### 4.4 长时间运行
