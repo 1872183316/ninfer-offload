@@ -182,6 +182,24 @@ On success the temporary file is renamed to `qwen3_8_flash_next.ninfer`, and
 - After success you may delete remaining `*.safetensors`/`*.part` in `models/flashnext-hf`; keep the
   tokenizer and config files.
 
+### 4.7 Adding MTP to an existing conversion
+
+The Flash-Next MTP predictor (`--components text,mtp`, about 1.5 GB after quantization) can be
+added to an existing text-only `.ninfer` without converting everything again: `--reuse` copies
+every object the old file already stores identically and converts only the rest, so streaming
+downloads just the MTP tensors (5.2 GB).
+
+```bash
+python -m tools.convert --model models/flashnext-hf --recipe qwen3_8_flash_next \
+  --components text,mtp --name qwen3.8-flash-next --out models/mtp/qwen3_8_flash_next.ninfer \
+  --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
+  --reuse models/qwen3_8_flash_next.ninfer --max-file-bytes 50000000000
+```
+
+The old file must come from the same checkpoint with the same recipe and `--precision`; the
+converter checks the recipe and precision recorded in it. The new file needs as much disk as the
+old one (on the development machine: 36 minutes, 972 of 1003 objects copied).
+
 ---
 
 ## 5. Manual example: a checkpoint already on disk
@@ -309,7 +327,7 @@ needs no calibration data.
 | `--precision` | none | Bits per class, e.g. `experts=4,expert-down=5,linear=8` |
 | `--dry-run` | off | Print formats and the estimated size, then exit |
 | `--override FILE` | none | Python file applied after the recipe and `--precision` |
-| `--components` | `text` | Any of `text,vision,mtp,dflash,dflash2` |
+| `--components` | `text` | Any of `text,vision,mtp,dflash,dflash2` (Flash-Next: `text` or `text,mtp`) |
 | `--source NAME=PATH` | none | Extra source, repeatable (`quantized=` for NVFP4 recipes, `dflash2=`, …) |
 | `--resource ROLE=PATH` | none | Replace a packaged resource, e.g. `chat_template.jinja=template.jinja` |
 | `--proposal` | off | Add the speculative-decoding proposal head (Dense recipes) |
@@ -321,6 +339,7 @@ needs no calibration data.
 | `--max-file-bytes` | 32000000000 | Per-file limit in bytes; larger outputs split into `.part-000N` |
 | `--stream-url URL` | none | Streaming mode (needs `shard_headers.json` from `tools.convert.download`) |
 | `--stream-budget-gb` | 20 | Download cache limit in GB; a range the current job waits for may exceed it |
+| `--reuse FILE` | none | Copy objects an existing conversion of the same checkpoint, recipe and precision stores identically; convert only the rest (see 4.7) |
 
 ---
 

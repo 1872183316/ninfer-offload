@@ -167,6 +167,22 @@ du -sh models/flashnext-hf/.stream               # 下载缓存占用
 - 重启前删除残留的临时输出：`rm models/.qwen3_8_flash_next.ninfer.*.tmp`。
 - 成功后可删除 `models/flashnext-hf/.stream`，保留 tokenizer 和 config。
 
+### 4.7 给已有模型补上 MTP
+
+Flash-Next 的 MTP 预测层（`--components text,mtp`，量化后约 1.5 GB）可以直接加到已有的纯文本
+`.ninfer` 上，不用全部重新转换：`--reuse` 会把旧文件里格式完全相同的对象原样复制，只转换其余部分，
+流式模式下只需下载 MTP 的张量（5.2 GB）。
+
+```bash
+python -m tools.convert --model models/flashnext-hf --recipe qwen3_8_flash_next \
+  --components text,mtp --name qwen3.8-flash-next --out models/mtp/qwen3_8_flash_next.ninfer \
+  --stream-url https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master/ \
+  --reuse models/qwen3_8_flash_next.ninfer --max-file-bytes 50000000000
+```
+
+旧文件必须来自同一份原版权重、同一个配方和同样的 `--precision`（转换器会检查旧文件里记录的配方和精度）。
+新文件需要与旧文件同样大小的磁盘空间（开发机上用时 36 分钟，1003 个对象中复制了 972 个）。
+
 ---
 
 ## 5. 手动转换实例：已下载到本地的模型
@@ -288,7 +304,7 @@ NInfer 的 GPU 和 CPU 计算内核目前只实现了 4/5/6/8 位分组整数（
 | `--precision` | 无 | 按类别改位数，如 `experts=4,expert-down=5,linear=8` |
 | `--dry-run` | 关 | 只打印格式和预计大小，然后退出 |
 | `--override FILE` | 无 | 在配方和 `--precision` 之后执行的 Python 文件 |
-| `--components` | `text` | `text,vision,mtp,dflash,dflash2` 中的若干项 |
+| `--components` | `text` | `text,vision,mtp,dflash,dflash2` 中的若干项（Flash-Next：`text` 或 `text,mtp`） |
 | `--source 名字=路径` | 无 | 额外数据源，可重复（NVFP4 配方的 `quantized=`、`dflash2=` 等） |
 | `--resource 角色=路径` | 无 | 替换打包的资源，如 `chat_template.jinja=模板.jinja` |
 | `--proposal` | 关 | 加入投机解码用的提议头（Dense 配方使用） |
@@ -300,6 +316,7 @@ NInfer 的 GPU 和 CPU 计算内核目前只实现了 4/5/6/8 位分组整数（
 | `--max-file-bytes` | 32000000000 | 单文件上限（字节），超过则切成 `.part-000N` |
 | `--stream-url URL` | 无 | 开启流式模式（需要 `download` 生成的 `shard_headers.json`） |
 | `--stream-budget-gb` | 20 | 流式下载缓存上限（GB）；当前任务正在等待的数据段可以超出 |
+| `--reuse FILE` | 无 | 从同一原版权重、同一配方和精度的已有转换中复制格式相同的对象，只转换其余部分（见 4.7） |
 
 ---
 

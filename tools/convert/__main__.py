@@ -9,8 +9,10 @@ from pathlib import Path
 import sys
 from collections.abc import Mapping
 
+from tools.artifact.reader import Artifact
+
 from .official_recipes import RECIPES
-from .pipeline import convert
+from .pipeline import convert, reusable_objects
 from .proposal import DEFAULT_RANKING, add_official_proposal
 from .qwen3_5 import build_model
 from .sources.streaming import StreamingSafetensorsSource
@@ -150,6 +152,12 @@ def main(argv=None):
     )
     parser.add_argument("--stream-budget-gb", type=float, default=20.0)
     parser.add_argument(
+        "--reuse",
+        type=Path,
+        help="copy objects that an existing conversion of the same checkpoint and recipe already "
+        "stores identically (for example to add a component); only the rest is read and converted",
+    )
+    parser.add_argument(
         "--precision",
         help="re-quantize projection classes after the recipe, e.g. "
         "experts=4,expert-down=5,linear=8 (bits: 4, 5, 6, 8)",
@@ -200,14 +208,26 @@ def main(argv=None):
             _report_estimate(recipe)
             return
 
+        reuse = None
+        if args.reuse:
+            reuse = stack.enter_context(Artifact(args.reuse))
+            previous = reuse.directory.provenance
+            if previous.get("recipe") != args.recipe or previous.get("precision") != args.precision:
+                raise ValueError(
+                    f"--reuse {args.reuse} was converted with recipe {previous.get('recipe')!r} "
+                    f"and precision {previous.get('precision')!r}; they must match"
+                )
         if args.stream_url:
-            jobs = recipe.prepare(device=args.device, rows_per_chunk=args.rows_per_chunk).weights
+            prepared = recipe.prepare(device=args.device, rows_per_chunk=args.rows_per_chunk)
+            reused = reusable_objects(prepared, reuse) if reuse is not None else {}
             base.plan(
                 [
-                    base.tensors_of(
+                    []
+                    if index in reused
+                    else base.tensors_of(
                         [model.parameters[name].source.label for name in job.parameters]
                     )
-                    for job in jobs
+                    for index, job in enumerate(prepared.weights)
                 ]
             )
 
@@ -243,6 +263,7 @@ def main(argv=None):
             rows_per_chunk=args.rows_per_chunk,
             max_file_bytes=args.max_file_bytes,
             progress=progress,
+            reuse=reuse,
         )
         print(
             f"wrote {args.out}: {report['objects']} objects, {len(report['files'])} files, {report['seconds']:.1f}s",

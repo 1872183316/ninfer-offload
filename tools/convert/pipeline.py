@@ -10,18 +10,61 @@ from typing import Callable
 
 import torch
 
-from tools.artifact.schema import ResourceSpec
+from tools.artifact.reader import Artifact
+from tools.artifact.schema import ResourceSpec, TensorObject
 from tools.artifact.tensor_output import TensorOutput
 from tools.artifact.writer import ArtifactWriter, DEFAULT_MAX_FILE_BYTES
 
 from .model import Model
-from .recipe import Recipe, WeightJob
+from .recipe import PreparedRecipe, Recipe, WeightJob
 
 
 def _json_default(value):
     if isinstance(value, Path):
         return str(value)
     raise TypeError(f"conversion report cannot serialize {type(value).__name__}")
+
+
+def _binding_objects(binding: dict) -> set[str]:
+    if "object" in binding:
+        return {binding["object"]}
+    return {part["object"] for part in binding.get("parts", ())}
+
+
+def _binding_ranges(binding: dict) -> tuple:
+    if "object" in binding:
+        return ("whole",)
+    return tuple(tuple(part["range"]) for part in binding["parts"])
+
+
+def reusable_objects(prepared: PreparedRecipe, artifact: Artifact) -> dict[int, str]:
+    """Job index -> object of `artifact` that already stores exactly that job's tensor.
+
+    A job is reusable when every parameter it produces is bound in `artifact` to one object with
+    the same element ranges, and that object has the job's shape, format and layout. The caller
+    guarantees that both conversions use the same source checkpoint and recipe.
+    """
+    old = artifact.directory.bindings
+    objects = artifact.by_id
+    result = {}
+    for index, job in enumerate(prepared.weights):
+        target = None
+        for name in job.parameters:
+            new, previous = prepared.bindings.get(name), old.get(name)
+            if new is None or previous is None or _binding_objects(new) != {job.spec.id}:
+                break
+            ids = _binding_objects(previous)
+            if len(ids) != 1 or (target is not None and ids != {target}):
+                break
+            if _binding_ranges(new) != _binding_ranges(previous):
+                break
+            target = next(iter(ids))
+        else:
+            obj = objects.get(target)
+            if (isinstance(obj, TensorObject) and tuple(obj.shape) == tuple(job.spec.shape)
+                    and obj.format == job.spec.format and obj.layout == job.spec.layout):
+                result[index] = target
+    return result
 
 
 def convert(
@@ -35,6 +78,7 @@ def convert(
     rows_per_chunk: int = 512,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     progress: Callable[[int, int, WeightJob], None] | None = None,
+    reuse: Artifact | None = None,
 ) -> dict:
     path = Path(output)
     report_path = Path(str(path) + ".conversion.json")
@@ -47,6 +91,7 @@ def convert(
         raise ValueError("CUDA conversion requested but CUDA is unavailable")
     start = time.perf_counter()
     prepared = recipe.prepare(device=str(chosen_device), rows_per_chunk=rows_per_chunk)
+    reused = reusable_objects(prepared, reuse) if reuse is not None else {}
     preparation_seconds = time.perf_counter() - start
     metadata = {} if name is None else {"name": name}
     provenance = {} if provenance is None else provenance
@@ -102,6 +147,10 @@ def convert(
         for index, job in enumerate(prepared.weights):
             if progress is not None:
                 progress(index, len(prepared.weights), job)
+            if index in reused:
+                # Same source, recipe and stored representation: copy the encoded bytes.
+                writer.write_object(job.spec.id, reuse.iter_object(reused[index]))
+                continue
             try:
                 job.prepared.produce(TensorOutput(writer, job.spec.id))
             except Exception as error:
@@ -120,6 +169,7 @@ def convert(
             for i, file in enumerate(writer.directory.files)
         ]
         report["payload_bytes"] = writer.directory.payload_bytes
+        report["reused_objects"] = len(reused)
     report["seconds"] = time.perf_counter() - start
     temporary = Path(str(report_path) + ".tmp")
     try:
