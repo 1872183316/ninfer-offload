@@ -1,7 +1,7 @@
 // Host routed-expert throughput at real bank sizes, with a DRAM read-bandwidth reference.
 //
 // usage: ninfer_host_moe_bench [threads=12] [tokens=1] [hidden=2048] [inter=512] [experts=256]
-//                              [top_k=8] [gate_up=q4] [down=q5] [layers=8]
+//                              [top_k=8] [gate_up=q4] [down=q5] [layers=8] [shared=0]
 // Each measured call touches a different layer's banks, so selected rows stream from DRAM.
 #include "ops/sparse_moe/host/host_moe.h"
 
@@ -112,6 +112,8 @@ int main(int argc, char** argv) {
     const QType gq    = parse(argc > 7 ? argv[7] : "q4");
     const QType dq    = parse(argc > 8 ? argv[8] : "q5");
     const int layers  = argc > 9 ? std::atoi(argv[9]) : 8;
+    // shared=1: every token selects token 0's experts (measures extra tokens per expert).
+    const bool shared = argc > 10 && std::atoi(argv[10]) != 0;
 
     if (!host_kernels_supported()) {
         std::printf("CPU lacks AVX2/FMA/F16C/BMI2\n");
@@ -146,6 +148,10 @@ int main(int argc, char** argv) {
         std::vector<int> uniq;
         for (int t = 0; t < T; ++t) {
             for (int s = 0; s < K; ++s) {
+                if (shared && t > 0) {
+                    ids[t * K + s] = ids[s];
+                    continue;
+                }
                 int e;
                 do { e = pick(rng); } while ([&] {
                     for (int q = 0; q < s; ++q)
