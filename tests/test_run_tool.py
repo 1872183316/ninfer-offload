@@ -11,13 +11,17 @@ from tools import run
 GIB = run.GIB
 
 
-def facts(device, experts_bytes, experts, qwen4exp=False, name="m"):
+def facts(device, experts_bytes, experts, qwen4exp=False, name="m", mtp=False, mtp_device=0,
+          mtp_host=0):
     return SimpleNamespace(device_bytes=device, expert_bytes=experts_bytes, host_bytes=0,
-                           experts=experts, qwen4exp=qwen4exp, name=name, kv=lambda ctx: 0)
+                           experts=experts, qwen4exp=qwen4exp, name=name, kv=lambda ctx: 0,
+                           mtp=mtp, mtp_device_bytes=mtp_device, mtp_host_bytes=mtp_host,
+                           mtp_kv=lambda ctx: 0)
 
 
 def args(**overrides):
-    values = dict(device=0, max_context=4096, offload=None, gpu_experts=None, threads=None)
+    values = dict(device=0, max_context=4096, offload=None, gpu_experts=None, threads=None,
+                  mtp=None, draft_tokens=run.DEFAULT_DRAFT_TOKENS)
     values.update(overrides)
     return argparse.Namespace(**values)
 
@@ -66,6 +70,25 @@ def test_dense_model_that_does_not_fit_is_rejected(machine):
 def test_offload_that_cannot_fit_dense_weights_is_rejected(machine):
     with pytest.raises(SystemExit, match="every expert on the CPU"):
         run.plan(facts(15 * GIB, 64 * GIB, 512), args())
+
+
+def test_mtp_is_enabled_when_the_model_has_it_and_its_weights_are_planned(machine):
+    plain = run.plan(facts(4 * GIB, 64 * GIB, 512, qwen4exp=True), args())
+    assert "--spec" not in plain
+    options = run.plan(facts(4 * GIB, 64 * GIB, 512, qwen4exp=True, mtp=True, mtp_device=GIB,
+                             mtp_host=GIB), args())
+    assert value(options, "--spec") == "mtp"
+    assert value(options, "--draft-tokens") == str(run.DEFAULT_DRAFT_TOKENS)
+    # The MTP device weights take room from the GPU experts.
+    assert int(value(options, "--moe-gpu-experts")) < int(value(plain, "--moe-gpu-experts"))
+
+
+def test_mtp_can_be_disabled_or_tuned(machine):
+    model = facts(4 * GIB, 64 * GIB, 512, qwen4exp=True, mtp=True)
+    assert "--spec" not in run.plan(model, args(mtp=False))
+    assert value(run.plan(model, args(draft_tokens=3)), "--draft-tokens") == "3"
+    with pytest.raises(SystemExit, match="no MTP component"):
+        run.plan(facts(4 * GIB, 64 * GIB, 512), args(mtp=True))
 
 
 def test_local_models_resolve_without_network(tmp_path, monkeypatch):

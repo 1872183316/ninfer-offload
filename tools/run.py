@@ -53,6 +53,10 @@ EXPERT_STATS = {
 }
 HF_ENDPOINTS = ("https://huggingface.co", "https://hf-mirror.com")
 
+# MTP draft tokens per round. On the development machine one draft was faster than no MTP on
+# every benchmark prompt; two and three drafts help code more but slow down free-form prose.
+DEFAULT_DRAFT_TOKENS = 1
+
 # Device memory kept free beyond the planned weights and runtime (CUDA context, graphs, slack).
 HEADROOM = int(1.5 * GIB)
 # Planned runtime besides weights and KV (workspace, state, tables).
@@ -284,13 +288,14 @@ def physical_cores() -> int:
 
 
 class ModelFacts:
-    """Byte sizes of the Text weights by placement, from the artifact directory."""
+    """Byte sizes of the Text (and MTP) weights by placement, from the artifact directory."""
 
     def __init__(self, path: Path) -> None:
         with Artifact(path) as artifact:
             directory = artifact.directory
             objects = {o.id: o for o in artifact.objects if isinstance(o, TensorObject)}
             self.name = directory.metadata.get("name", "")
+            self.mtp = "mtp" in directory.components
             config = directory.components.get("text", {})
             config = config.get("config", config) if isinstance(config, dict) else {}
             config = config.get("text_config", config)
@@ -305,28 +310,47 @@ class ModelFacts:
         kv_bytes = 2 * int(config.get("num_key_value_heads", 0)) * int(config.get("head_dim", 0)) * 2
         self.kv_bytes_per_token = attention * kv_bytes
         self.index_bytes_per_token = attention * int(config.get("indexer_head_dim", 0)) * 2
+        self.mtp_kv_bytes_per_token = kv_bytes
+        self.mtp_index_bytes_per_token = int(config.get("indexer_head_dim", 0)) * 2
         expert, host, device = set(), set(), set()
+        mtp_device, mtp_host = set(), set()
         for name, binding in directory.bindings.items():
-            if not name.startswith("text/"):
-                continue
             ids = [binding["object"]] if "object" in binding else [
                 part["object"] for part in binding.get("parts", [])]
-            bucket = expert if "/moe/experts/" in name else host if "/ple/table" in name else device
-            bucket.update(i for i in ids if i in objects)
+            ids = [i for i in ids if i in objects]
+            if name.startswith("text/"):
+                bucket = expert if "/moe/experts/" in name else host if "/ple/table" in name else device
+                bucket.update(ids)
+            elif name.startswith("mtp/"):
+                # Qwen4-Exp MTP experts stay in host memory; other MTP weights live on the GPU.
+                (mtp_host if self.qwen4exp and "/moe/experts/" in name else mtp_device).update(ids)
         device -= expert | host
+        mtp_device -= device | expert | host
         self.expert_bytes = sum(objects[i].bytes for i in expert)
         self.host_bytes = sum(objects[i].bytes for i in host)
         self.device_bytes = sum(objects[i].bytes for i in device)
+        self.mtp_device_bytes = sum(objects[i].bytes for i in mtp_device)
+        self.mtp_host_bytes = sum(objects[i].bytes for i in mtp_host)
 
     def kv(self, context: int) -> int:
         index = self.index_bytes_per_token if context > self.indexer_limit > 0 else 0
         return context * (self.kv_bytes_per_token + index)
 
+    def mtp_kv(self, context: int) -> int:
+        """The MTP layer's own attention KV (and QSA index) stream."""
+        index = self.mtp_index_bytes_per_token if context > self.indexer_limit > 0 else 0
+        return context * (self.mtp_kv_bytes_per_token + index)
+
 
 def plan(facts: ModelFacts, args) -> list[str]:
     free, total, name = gpu_memory(args.device)
     context = args.max_context or (8192 if facts.qwen4exp else 32768)
+    use_mtp = facts.mtp if args.mtp is None else args.mtp
+    if use_mtp and not facts.mtp:
+        raise SystemExit("--mtp: this model file has no MTP component")
     fixed = facts.device_bytes + RUNTIME + facts.kv(context) + HEADROOM
+    if use_mtp:
+        fixed += facts.mtp_device_bytes + facts.mtp_kv(context)
     full = fixed + facts.expert_bytes
     log(f"GPU {name}: {free / GIB:.1f} of {total / GIB:.1f} GiB free; model {facts.name or '?'}: "
         f"{facts.device_bytes / GIB:.1f} GiB dense weights, {facts.expert_bytes / GIB:.1f} GiB "
@@ -339,6 +363,8 @@ def plan(facts: ModelFacts, args) -> list[str]:
         if full > free:
             raise SystemExit(f"the model needs about {full / GIB:.1f} GiB of free GPU memory; "
                              f"{free / GIB:.1f} GiB is free (dense models cannot offload)")
+        if use_mtp:
+            options += ["--spec", "mtp", "--draft-tokens", str(args.draft_tokens)]
         return options
     if facts.experts == 0:
         raise SystemExit("--moe-offload needs a MoE model")
@@ -347,7 +373,7 @@ def plan(facts: ModelFacts, args) -> list[str]:
                          f"{fixed / GIB:.1f} GiB of free GPU memory; {free / GIB:.1f} GiB is free "
                          "(try a smaller --max-context)")
     # Routed experts are resident in host memory; host-mapped tables are paged in on demand.
-    host_need = facts.expert_bytes
+    host_need = facts.expert_bytes + (facts.mtp_host_bytes if use_mtp else 0)
     if host_need + 4 * GIB > available_memory():
         log(f"warning: offload keeps {host_need / GIB:.0f} GiB in host memory but only "
             f"{available_memory() / GIB:.0f} GiB is available; loading may swap or fail")
@@ -365,6 +391,9 @@ def plan(facts: ModelFacts, args) -> list[str]:
     log(f"offload: {resident} of {facts.experts} experts per layer on the GPU, {threads} CPU "
         f"threads, {host_need / GIB:.0f} GiB of experts in host memory"
         + (f" (+{facts.host_bytes / GIB:.0f} GiB mapped table)" if facts.host_bytes else ""))
+    if use_mtp:
+        options += ["--spec", "mtp", "--draft-tokens", str(args.draft_tokens)]
+        log(f"MTP speculative decoding with {args.draft_tokens} draft token(s) per round")
     return options
 
 
@@ -505,6 +534,10 @@ def main() -> None:
                         help="force routed-expert offload on or off (default: automatic)")
     parser.add_argument("--gpu-experts", type=int, help="experts per layer on the GPU (offload)")
     parser.add_argument("--threads", type=int, help="CPU expert threads (default: physical cores)")
+    parser.add_argument("--mtp", action=argparse.BooleanOptionalAction, default=None,
+                        help="MTP speculative decoding (default: on when the model file has MTP)")
+    parser.add_argument("--draft-tokens", type=int, default=DEFAULT_DRAFT_TOKENS,
+                        help=f"MTP draft tokens per round (default {DEFAULT_DRAFT_TOKENS})")
     parser.add_argument("--device", type=int, default=0, help="CUDA device index")
     parser.add_argument("--stream-budget-gb", type=int, default=20,
                         help="download cache for streaming conversion")
