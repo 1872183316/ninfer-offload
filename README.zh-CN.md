@@ -62,7 +62,7 @@ python -m tools.run Qwen/Qwen3.8-Flash-Next   # 源码目录
 ## 快速开始：免编译、免转换
 
 预编译的 Linux 程序（RTX 40 系）在 [Releases 页面](https://github.com/1872183316/ninfer-offload/releases)
-（长上下文和 API 服务需 v0.2.0 或更新），转换好的 Flash-Next 模型（108 GB，3 个文件）在 ModelScope：
+（长上下文和 API 服务需 v0.2.0 或更新），转换好的 Flash-Next 模型（110 GB，3 个文件，含 MTP 预测层；使用 MTP 需 v0.3.0 或更新）在 ModelScope：
 [mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload](https://modelscope.cn/models/mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload)。
 
 ```bash
@@ -102,7 +102,7 @@ python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out q
 在已有转换上补上，见转换器说明）可以加 `--spec mtp --draft-tokens N`。每轮 1 个草稿时，4 个测试提示词
 的解码快了 3%～22%（改代码从 12.6 提到 15.2 tok/s）；2 或 3 个草稿在代码上能快 32%/39%，但写散文会变慢
 （作文 -5%/-21%）。模型文件带 MTP 时 `ninfer-run` 默认开启 1 个草稿（`--no-mtp` 关闭，`--draft-tokens N`
-调整）。ModelScope 上已发布的转换只含文本部分。
+调整）。ModelScope 上已发布的转换包含 MTP 预测层。
 
 兼容 OpenAI / Anthropic 接口的服务端也支持同样的卸载参数（需 v0.2.0 或更新）：
 

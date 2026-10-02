@@ -68,7 +68,7 @@ engine unchanged.
 
 Prebuilt Linux binaries (RTX 40-series) are on the
 [releases page](https://github.com/1872183316/ninfer-offload/releases) (v0.2.0 or newer for long contexts and the API server), and the
-converted Flash-Next model (108 GB, three files) is on ModelScope:
+converted Flash-Next model (110 GB, three files, with the MTP predictor; v0.3.0 or newer for MTP) is on ModelScope:
 [mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload](https://modelscope.cn/models/mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload).
 
 ```bash
@@ -110,7 +110,7 @@ or add it to an existing conversion with `--reuse`, see the converter guide) acc
 `--spec mtp --draft-tokens N`. With one draft, decode was 3-22% faster on the four benchmark prompts
 (code edit 12.6 -> 15.2 tok/s); two or three drafts reach +32%/+39% on code but slow down free-form
 prose (-5%/-21% on the essay). `ninfer-run` turns MTP on with one draft when the model file has it
-(`--no-mtp`, `--draft-tokens N`). The published ModelScope conversion is text-only.
+(`--no-mtp`, `--draft-tokens N`). The published ModelScope conversion includes the MTP predictor.
 
 The OpenAI/Anthropic-compatible server accepts the same offload options (v0.2.0 or newer):
 
