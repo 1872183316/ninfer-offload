@@ -29,6 +29,7 @@ x8）、Ubuntu、CUDA 12.8。贪心解码、BF16 KV、4 个提示词各跑 2 遍
 |---|---|---|
 | Qwen3.8-Flash-Next，专家 4.58 bit/权重，模型文件 108 GB | 0（显存 5.2 GB） | 10.0～10.2 |
 | | 64 | 12.5～14.1 |
+| | 64，MTP 1 个草稿（`ninfer-serve`） | 14.7～16.6 |
 | Qwen3.6-35B-A3B（groupwise-int） | 128 | 47.5～59.3 |
 | | 176 | 60.6～68.7 |
 
@@ -95,7 +96,13 @@ python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out q
 
 上下文超过 2051 个 token 时使用模型自带的 QSA token 选择（每个查询只看得分最高的 512 个 4-token
 块和最近的尾部 token），要求 `--kv-dtype bf16`（默认值）且只支持纯文本输入；2051 以内仍是原来的
-稠密注意力。Flash-Next 还没有实现 MTP / 投机解码。`bench/offload/` 里有测速和校准脚本。
+稠密注意力。`bench/offload/` 里有测速和校准脚本。
+
+**MTP 投机解码。** 包含 MTP 预测层的模型文件（转换时加 `--components text,mtp`，或用 `--reuse`
+在已有转换上补上，见转换器说明）可以加 `--spec mtp --draft-tokens N`。每轮 1 个草稿时，4 个测试提示词
+的解码快了 3%～22%（改代码从 12.6 提到 15.2 tok/s）；2 或 3 个草稿在代码上能快 32%/39%，但写散文会变慢
+（作文 -5%/-21%）。模型文件带 MTP 时 `ninfer-run` 默认开启 1 个草稿（`--no-mtp` 关闭，`--draft-tokens N`
+调整）。ModelScope 上已发布的转换只含文本部分。
 
 兼容 OpenAI / Anthropic 接口的服务端也支持同样的卸载参数（需 v0.2.0 或更新）：
 

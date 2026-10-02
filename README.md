@@ -30,6 +30,7 @@ x8), Ubuntu, CUDA 12.8. Greedy decode, BF16 KV, 4 prompts x 2 repetitions:
 |---|---|---|
 | Qwen3.8-Flash-Next, experts 4.58 bits/weight, 108 GB artifact | 0 (5.2 GB VRAM) | 10.0-10.2 |
 | | 64 | 12.5-14.1 |
+| | 64, MTP 1 draft (`ninfer-serve`) | 14.7-16.6 |
 | Qwen3.6-35B-A3B groupwise-int | 128 | 47.5-59.3 |
 | | 176 | 60.6-68.7 |
 
@@ -101,8 +102,15 @@ disk requirements and troubleshooting.
 
 Contexts above 2051 tokens use the model's QSA token selection (each query attends to its 512
 highest-scoring 4-token blocks plus the recent tail) and require `--kv-dtype bf16` (the default)
-and text-only input; up to 2051 tokens attention is dense and unchanged. MTP/speculative decoding is
-not implemented for Flash-Next. `bench/offload/` holds the evaluation and calibration scripts.
+and text-only input; up to 2051 tokens attention is dense and unchanged. `bench/offload/` holds the
+evaluation and calibration scripts.
+
+**MTP speculative decoding.** A conversion that includes the MTP predictor (`--components text,mtp`,
+or add it to an existing conversion with `--reuse`, see the converter guide) accepts
+`--spec mtp --draft-tokens N`. With one draft, decode was 3-22% faster on the four benchmark prompts
+(code edit 12.6 -> 15.2 tok/s); two or three drafts reach +32%/+39% on code but slow down free-form
+prose (-5%/-21% on the essay). `ninfer-run` turns MTP on with one draft when the model file has it
+(`--no-mtp`, `--draft-tokens N`). The published ModelScope conversion is text-only.
 
 The OpenAI/Anthropic-compatible server accepts the same offload options (v0.2.0 or newer):
 
