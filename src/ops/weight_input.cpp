@@ -259,8 +259,7 @@ HybridSparseMoeWeights prepare_hybrid_sparse_moe_weights(
     const WeightInput& router, const WeightInput& shared_score,
     std::span<const WeightInput> expert_gate_up, std::span<const WeightInput> expert_down,
     const WeightInput& shared_gate, const WeightInput& shared_up, const WeightInput& shared_down,
-    std::span<const std::int32_t> resident, const WeightInput* device_gate_up,
-    const WeightInput* device_down, std::int32_t top_k) {
+    std::span<const std::int32_t> resident, std::int32_t top_k) {
     const auto experts = expert_down.size();
     require(experts > 0 && experts <= kHybridMoeMaxExperts && expert_gate_up.size() == 2 * experts,
             "hybrid MoE: expert count is unsupported");
@@ -301,25 +300,13 @@ HybridSparseMoeWeights prepare_hybrid_sparse_moe_weights(
     out.hidden              = static_cast<std::int32_t>(hidden);
     out.intermediate        = static_cast<std::int32_t>(intermediate);
     out.shared_intermediate = shared_d.weight.k;
-    out.slot_of_expert.assign(experts, -1);
-    for (std::size_t s = 0; s < resident.size(); ++s) {
-        const auto e = resident[s];
-        require(e >= 0 && static_cast<std::size_t>(e) < experts &&
-                    out.slot_of_expert[static_cast<std::size_t>(e)] < 0,
+    std::vector<bool> taken(experts, false);
+    for (const auto e : resident) {
+        require(e >= 0 && static_cast<std::size_t>(e) < experts && !taken[static_cast<std::size_t>(e)],
                 "hybrid MoE: invalid resident expert list");
-        out.slot_of_expert[static_cast<std::size_t>(e)] = static_cast<std::int16_t>(s);
+        taken[static_cast<std::size_t>(e)] = true;
     }
-    if (!resident.empty()) {
-        require(device_gate_up && device_down, "hybrid MoE: resident experts need replicas");
-        out.device_gate_up = prepare_linear_weight(*device_gate_up).weight;
-        out.device_down    = prepare_linear_weight(*device_down).weight;
-        require(out.device_gate_up.qtype == out.host_gate_up.qtype &&
-                    out.device_down.qtype == out.host_down.qtype &&
-                    out.device_gate_up.n ==
-                        static_cast<std::int32_t>(resident.size() * 2 * intermediate) &&
-                    out.device_down.n == static_cast<std::int32_t>(resident.size() * hidden),
-                "hybrid MoE: replica geometry differs");
-    }
+    out.resident.assign(resident.begin(), resident.end());
     return out;
 }
 

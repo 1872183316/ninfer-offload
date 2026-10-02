@@ -275,6 +275,12 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             builder, DType::I32, {config_words, static_cast<std::int32_t>(plan.max_concurrency)},
             "sampling config");
     }
+    for (const auto* h : offloaded_moe_layers(parameters)) {
+        const auto bytes = ops::hybrid_moe_slot_bytes(*h);
+        out.moe_slots.push_back(bytes ? builder.add(static_cast<std::size_t>(bytes), kArenaAlign,
+                                                    "MoE expert slots")
+                                      : LayoutRegion{});
+    }
     out.bytes = builder.finish(kArenaAlign, "persistent layout");
     out.kv_payload_bytes =
         out.decoder.kv_payload_bytes() + (out.dflash ? out.dflash->kv_payload_bytes() : 0);
@@ -1142,6 +1148,23 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
 }
 
 } // namespace
+
+std::vector<const ops::HybridSparseMoeWeights*>
+offloaded_moe_layers(const execution::Parameters& parameters) {
+    std::vector<const ops::HybridSparseMoeWeights*> out;
+    for (const auto& layer : parameters.text.layers) {
+        if (const auto* h = std::get_if<ops::HybridSparseMoeWeights>(&layer.ffn)) {
+            out.push_back(h);
+        }
+    }
+    if (parameters.qwen4_mtp) {
+        if (const auto* h =
+                std::get_if<ops::HybridSparseMoeWeights>(&parameters.qwen4_mtp->layer.ffn)) {
+            out.push_back(h);
+        }
+    }
+    return out;
+}
 
 std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,

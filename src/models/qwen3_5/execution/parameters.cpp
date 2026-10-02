@@ -75,19 +75,11 @@ public:
         }
         if (moe.offload) {
             const auto& o = *moe.offload;
-            std::optional<ops::WeightInput> device_gate_up;
-            std::optional<ops::WeightInput> device_down;
-            if (!o.resident.empty()) {
-                device_gate_up.emplace(model_.input(o.device_gate_up));
-                device_down.emplace(model_.input(o.device_down));
-            }
             return with_context(model_.weight(moe.router).name, [&]() -> FfnParameters {
                 return ops::prepare_hybrid_sparse_moe_weights(
                     model_.input(moe.router), model_.input(moe.shared_score), gate_up, down,
                     model_.input(moe.shared.gate), model_.input(moe.shared.up),
-                    model_.input(moe.shared.down), o.resident,
-                    device_gate_up ? &*device_gate_up : nullptr,
-                    device_down ? &*device_down : nullptr, static_cast<std::int32_t>(top_k));
+                    model_.input(moe.shared.down), o.resident, static_cast<std::int32_t>(top_k));
             });
         }
         if (top_k != 8) { throw std::invalid_argument("SparseMoe implements top-8 routing"); }

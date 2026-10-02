@@ -60,7 +60,7 @@ std::string usage_text() {
            "       [--context N] [--stride N] [--device N]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--output <directory>] [--token-nll FILE]\n"
            "       [--moe-offload [--moe-gpu-experts N] [--moe-threads N] "
-           "[--moe-expert-stats FILE]]\n"
+           "[--moe-expert-stats FILE] [--moe-static-experts]]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 
@@ -130,6 +130,8 @@ Options parse_options(int argc, char** argv) {
                 parse_integer<std::uint32_t>(value("--moe-threads"), "moe-threads");
         } else if (option == "--moe-expert-stats") {
             out.moe_offload.expert_stats = std::string(value("--moe-expert-stats"));
+        } else if (option == "--moe-static-experts") {
+            out.moe_offload.dynamic_residency = false;
         } else if (option == "--output") {
             out.output = std::filesystem::path(value("--output"));
         } else if (option == "--token-nll") {

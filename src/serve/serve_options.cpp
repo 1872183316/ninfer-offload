@@ -87,7 +87,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--moe-offload [--moe-gpu-experts N] [--moe-threads N] [--moe-expert-stats FILE] "
-           "[--moe-record-stats FILE]] "
+           "[--moe-record-stats FILE] [--moe-static-experts]] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
@@ -111,7 +111,8 @@ std::string serve_usage_text(const char* argv0) {
            "threads;\n"
            "       --moe-gpu-experts places N experts per layer on the GPU, ranked by "
            "--moe-expert-stats\n"
-           "       (one line of per-expert routing counts per layer), else the lowest ids;\n"
+           "       (one line of per-expert routing counts per layer), else the lowest ids; they then\n"
+           "       follow recent routing unless --moe-static-experts keeps them fixed;\n"
            "       --moe-record-stats writes the observed routing counts at shutdown\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
@@ -313,6 +314,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--moe-record-stats") {
             options.moe_offload.record_stats = require_value("--moe-record-stats");
             moe_option_explicit              = true;
+        } else if (arg == "--moe-static-experts") {
+            options.moe_offload.dynamic_residency = false;
+            moe_option_explicit                   = true;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {

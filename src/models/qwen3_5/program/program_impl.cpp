@@ -86,21 +86,13 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
          workspace_plan.vision->general_capacity_bytes != workspace_plan.general_capacity)) {
         throw std::invalid_argument("Qwen3.5 workspace plan does not match startup features");
     }
+    const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
     {
         std::int32_t hidden = 0;
         std::int32_t top_k  = 0;
-        // Host MoE layers in ordinal order: the Text stack, then the Qwen4-Exp MTP layer.
-        std::vector<const ops::HybridSparseMoeWeights*> offloaded;
-        for (const auto& layer : parameters.text.layers) {
-            if (const auto* h = std::get_if<ops::HybridSparseMoeWeights>(&layer.ffn)) {
-                offloaded.push_back(h);
-            }
-        }
-        if (parameters.qwen4_mtp) {
-            if (const auto* h =
-                    std::get_if<ops::HybridSparseMoeWeights>(&parameters.qwen4_mtp->layer.ffn)) {
-                offloaded.push_back(h);
-            }
+        const auto offloaded = offloaded_moe_layers(parameters);
+        if (offloaded.size() != plan.persistent.moe_slots.size()) {
+            throw std::logic_error("MoE expert slot plan differs from the offloaded layers");
         }
         for (const auto* h : offloaded) {
             hidden = std::max(hidden, h->hidden);
@@ -126,9 +118,16 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
             // Every Text call carries at most one prefill chunk or one decode/verify batch.
             const auto max_tokens = static_cast<std::int32_t>(
                 std::max(prefill_chunk, max_concurrency * (draft_window + 1U)));
-            host_moe = std::make_unique<ops::HybridMoeHostRuntime>(threads, max_tokens, hidden, top_k);
-            for (const auto* h : offloaded) {
-                if (host_moe->add_layer(*h) != h->layer) {
+            host_moe = std::make_unique<ops::HybridMoeHostRuntime>(
+                threads, max_tokens, hidden, top_k,
+                offload.dynamic_residency ? ops::HybridMoeResidency::Dynamic
+                                          : ops::HybridMoeResidency::Static);
+            for (std::size_t i = 0; i < offloaded.size(); ++i) {
+                const auto* h     = offloaded[i];
+                const auto& slots = plan.persistent.moe_slots[i];
+                const auto banks  = ops::hybrid_moe_slot_banks(
+                    *h, slots.bytes ? slots.bind(backing).data : nullptr);
+                if (host_moe->add_layer(*h, banks) != h->layer) {
                     throw std::logic_error("offloaded MoE layer order differs from parameters");
                 }
             }
@@ -139,7 +138,6 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
             }
         }
     }
-    const DeviceSpan backing = persistent.alloc_bytes(plan.persistent.bytes, 256);
     if (!plan.context_cache.max_private_continuations || !plan.context_cache.max_shared_prefixes) {
         throw std::logic_error("Qwen3.5 context cache options are not normalized");
     }

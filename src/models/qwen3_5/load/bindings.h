@@ -14,17 +14,10 @@ namespace ninfer::models::qwen3_5::loading {
 
 [[nodiscard]] FrontendResources bind_resources(artifact::Binder& binder, const Config& config);
 
-struct ReplicaSource {
-    artifact::ObjectHandle object;
-    std::size_t index = 0;
-};
-
 struct PendingWeight {
     artifact::ParameterReference reference;
     std::vector<WeightUse> uses;
     std::vector<std::string> source_objects;
-    // Set for a device row replica; its view covers the whole replica parent.
-    std::optional<ReplicaSource> replica;
 };
 
 class Bindings {
@@ -35,9 +28,6 @@ public:
                                      std::vector<std::string> inputs   = {},
                                      std::optional<QType> exact_format = {},
                                      artifact::Residency residency     = artifact::Residency::Device);
-    // A device replica of rows of a Host-resident parent, used as one A16 matrix input.
-    [[nodiscard]] WeightId replica(std::string name, artifact::ObjectHandle object,
-                                   std::vector<artifact::RowRange> rows, artifact::Shape shape);
     [[nodiscard]] WeightId direct(std::string name, artifact::Shape shape,
                                   QType format = QType::BF16);
 

@@ -55,12 +55,11 @@ prepare_sparse_moe_weights(const WeightInput& router, const WeightInput& shared_
                            std::span<const WeightInput> expert_down, const WeightInput& shared_gate,
                            const WeightInput& shared_up, const WeightInput& shared_down);
 
-// Host-resident routed banks plus optional device replicas of `resident` experts (slot order).
+// Host-resident routed banks; `resident` lists the experts given device slots at startup.
 [[nodiscard]] HybridSparseMoeWeights prepare_hybrid_sparse_moe_weights(
     const WeightInput& router, const WeightInput& shared_score,
     std::span<const WeightInput> expert_gate_up, std::span<const WeightInput> expert_down,
     const WeightInput& shared_gate, const WeightInput& shared_up, const WeightInput& shared_down,
-    std::span<const std::int32_t> resident, const WeightInput* device_gate_up,
-    const WeightInput* device_down, std::int32_t top_k);
+    std::span<const std::int32_t> resident, std::int32_t top_k);
 
 } // namespace ninfer::ops

@@ -100,7 +100,7 @@ std::string usage_text(const char* argv0) {
            "       [--reasoning-effort none|minimal|low|medium|high|xhigh|max] [--vision]\n"
            "       [--no-cuda-graph]\n"
            "       [--moe-offload [--moe-gpu-experts N] [--moe-threads N] "
-           "[--moe-expert-stats FILE] [--moe-record-stats FILE]]\n"
+           "[--moe-expert-stats FILE] [--moe-record-stats FILE] [--moe-static-experts]]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
@@ -111,7 +111,8 @@ std::string usage_text(const char* argv0) {
            "threads;\n"
            "--moe-gpu-experts places N experts per layer on the GPU, ranked by "
            "--moe-expert-stats\n"
-           "(one line of per-expert routing counts per layer), else the lowest ids.\n"
+           "(one line of per-expert routing counts per layer), else the lowest ids; they then\n"
+           "follow recent routing unless --moe-static-experts keeps them fixed.\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
            "toward --max-new.\n"
            "--kv-capacity auto leaves " +
@@ -187,6 +188,8 @@ Options parse_options(int argc, char** argv) {
             options.moe_offload.expert_stats = value(arg);
         } else if (arg == "--moe-record-stats") {
             options.moe_offload.record_stats = value(arg);
+        } else if (arg == "--moe-static-experts") {
+            options.moe_offload.dynamic_residency = false;
         } else if (arg == "--stop-token-id") {
             const std::uint32_t token = parse_u32(value(arg), "stop-token-id", true);
             if (token > static_cast<std::uint32_t>(std::numeric_limits<TokenId>::max())) {

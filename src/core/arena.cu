@@ -274,6 +274,31 @@ PinnedHostBuffer& PinnedHostBuffer::operator=(PinnedHostBuffer&& other) noexcept
     return *this;
 }
 
+HostPageLock::HostPageLock(void* data, std::size_t size_bytes) {
+    if (!data || size_bytes == 0) { throw std::invalid_argument("HostPageLock needs a range"); }
+    const cudaError_t err = cudaHostRegister(data, size_bytes, cudaHostRegisterDefault);
+    if (err != cudaSuccess) {
+        throw std::runtime_error(cuda_error_message("cudaHostRegister failed", err));
+    }
+    data_ = data;
+}
+
+HostPageLock::~HostPageLock() {
+    if (data_) { (void)cudaHostUnregister(data_); }
+}
+
+HostPageLock::HostPageLock(HostPageLock&& other) noexcept : data_(other.data_) {
+    other.data_ = nullptr;
+}
+
+HostPageLock& HostPageLock::operator=(HostPageLock&& other) noexcept {
+    if (this == &other) { return *this; }
+    if (data_) { (void)cudaHostUnregister(data_); }
+    data_       = other.data_;
+    other.data_ = nullptr;
+    return *this;
+}
+
 void* PinnedHostBuffer::data() const noexcept { return data_; }
 
 std::size_t PinnedHostBuffer::size() const noexcept { return size_; }

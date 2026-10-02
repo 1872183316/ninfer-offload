@@ -162,6 +162,9 @@ struct MoeOffloadOptions {
     // When set, per-layer routing counts observed by the host runtime are written here at
     // shutdown in the expert_stats format.
     std::filesystem::path record_stats;
+    // The device-resident experts follow recent routing (an expert cache over resident_experts
+    // slots per layer); otherwise the startup choice stays fixed.
+    bool dynamic_residency = true;
 
     bool operator==(const MoeOffloadOptions&) const = default;
 };

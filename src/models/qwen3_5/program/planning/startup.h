@@ -10,6 +10,7 @@
 #include "models/qwen3_5/program/round_buffers.h"
 #include "models/qwen3_5/state/state_image.h"
 #include "models/load_options.h"
+#include "ninfer/ops/hybrid_sparse_moe.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -42,9 +43,15 @@ struct PersistentLayout {
     std::optional<TensorLayout> score_hidden;
     std::optional<TensorLayout> token_counts;
     std::optional<TensorLayout> sampling_config;
+    // Device expert slots of each offloaded MoE layer, in offloaded_moe_layers order.
+    std::vector<LayoutRegion> moe_slots;
     std::size_t bytes            = 0;
     std::size_t kv_payload_bytes = 0;
 };
+
+// Host-offloaded MoE layers in runtime order: the Text stack, then the Qwen4-Exp MTP layer.
+[[nodiscard]] std::vector<const ops::HybridSparseMoeWeights*>
+offloaded_moe_layers(const execution::Parameters& parameters);
 
 struct VisionWorkspacePlan {
     std::int32_t output_hidden         = 0;

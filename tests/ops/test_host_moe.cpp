@@ -51,14 +51,15 @@ int check(QType gu_type, QType down_type, std::int32_t E, std::int32_t H, std::i
             alpha[t * top_k + s] = 0.05F + 0.1F * static_cast<float>((s + t) % 7);
         }
     }
-    std::vector<std::uint8_t> on_host(static_cast<std::size_t>(E));
-    for (std::int32_t e = 0; e < E; ++e) on_host[e] = (e % 3) != 1; // some experts stay on GPU
+    // Selections of some experts are taken elsewhere (negative ids) and contribute nothing.
+    const auto on_host = [](std::int32_t e) { return (e % 3) != 1; };
+    std::vector<std::int32_t> job_ids(ids.size());
+    for (std::size_t i = 0; i < ids.size(); ++i) job_ids[i] = on_host(ids[i]) ? ids[i] : -1 - ids[i];
 
     std::vector<float> out(static_cast<std::size_t>(T) * H, NAN);
     ops::host::HostThreadPool pool(threads);
     ops::host::HostMoeExecutor exec(pool);
-    ops::host::HostMoeJob job{T, top_k, x.data(), ids.data(), alpha.data(), on_host.data(),
-                              out.data()};
+    ops::host::HostMoeJob job{T, top_k, x.data(), job_ids.data(), alpha.data(), out.data()};
     exec.run(banks, job);
 
     // FP64 oracle with exact logical weight decode.
@@ -71,7 +72,7 @@ int check(QType gu_type, QType down_type, std::int32_t E, std::int32_t H, std::i
         std::vector<double> yabs(static_cast<std::size_t>(H), 0.0);
         for (std::int32_t s = 0; s < top_k; ++s) {
             const std::int32_t e = ids[t * top_k + s];
-            if (!on_host[e]) continue;
+            if (!on_host(e)) continue;
             std::vector<double> act(static_cast<std::size_t>(I));
             for (std::int32_t j = 0; j < I; ++j) {
                 double g = 0.0;

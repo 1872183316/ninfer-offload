@@ -136,7 +136,6 @@ int main(int argc, char** argv) {
     std::vector<float> x(static_cast<std::size_t>(T) * H, 0.25F);
     std::vector<std::int32_t> ids(static_cast<std::size_t>(T) * K);
     std::vector<float> alpha(ids.size(), 1.0F / K);
-    std::vector<std::uint8_t> on_host(E, 1);
     std::vector<float> out(static_cast<std::size_t>(T) * H);
     HostMoeExecutor exec(pool);
 
@@ -162,7 +161,7 @@ int main(int argc, char** argv) {
                 if (std::find(uniq.begin(), uniq.end(), e) == uniq.end()) uniq.push_back(e);
             }
         }
-        const HostMoeJob job{T, K, x.data(), ids.data(), alpha.data(), on_host.data(), out.data()};
+        const HostMoeJob job{T, K, x.data(), ids.data(), alpha.data(), out.data()};
         const double t0 = now();
         exec.run(banks[(it + 40) % layers], job);
         const double dt = now() - t0;

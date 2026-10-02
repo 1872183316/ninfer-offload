@@ -37,8 +37,12 @@ int main() {
     failures += check(!defaults.moe_offload.enabled, "MoE offload is not disabled by default");
     const ServeOptions offload =
         parse({"ninfer-serve", "model.ninfer", "--moe-offload", "--moe-gpu-experts", "64",
-               "--moe-threads", "12", "--moe-expert-stats", "s.txt", "--moe-record-stats", "r.txt"});
+               "--moe-threads", "12", "--moe-expert-stats", "s.txt", "--moe-record-stats", "r.txt",
+               "--moe-static-experts"});
+    failures += check(defaults.moe_offload.dynamic_residency,
+                      "MoE expert residency is not dynamic by default");
     failures += check(offload.moe_offload.enabled && offload.moe_offload.resident_experts == 64 &&
+                          !offload.moe_offload.dynamic_residency &&
                           offload.moe_offload.host_threads == 12 &&
                           offload.moe_offload.expert_stats == "s.txt" &&
                           offload.moe_offload.record_stats == "r.txt",

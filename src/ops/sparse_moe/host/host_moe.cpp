@@ -85,7 +85,7 @@ void HostMoeExecutor::run(const HostExpertBanks& banks, const HostMoeJob& job) {
     const std::int32_t T = job.tokens;
     const std::int32_t H = banks.hidden;
     const std::int32_t I = banks.intermediate;
-    if (T <= 0 || job.top_k <= 0 || !job.x || !job.ids || !job.alpha || !job.on_host || !job.out) {
+    if (T <= 0 || job.top_k <= 0 || !job.x || !job.ids || !job.alpha || !job.out) {
         throw std::invalid_argument("host MoE: invalid job");
     }
     if (banks.gate_up.k != H || banks.down.k != I || banks.gate_up.rows != banks.experts * 2 * I ||
@@ -101,8 +101,8 @@ void HostMoeExecutor::run(const HostExpertBanks& banks, const HostMoeJob& job) {
     for (std::int32_t t = 0; t < T; ++t) {
         for (std::int32_t s = 0; s < job.top_k; ++s) {
             const std::int32_t e = job.ids[t * job.top_k + s];
-            if (e < 0 || e >= banks.experts) throw std::invalid_argument("host MoE: invalid id");
-            if (!job.on_host[e]) continue;
+            if (e < 0) continue;
+            if (e >= banks.experts) throw std::invalid_argument("host MoE: invalid id");
             auto it = std::find(unique_.begin(), unique_.end(), e);
             std::size_t u = static_cast<std::size_t>(it - unique_.begin());
             if (it == unique_.end()) unique_.push_back(e);

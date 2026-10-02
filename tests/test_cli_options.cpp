@@ -96,8 +96,10 @@ int main() {
 #endif
     const ninfer::cli::Options offload =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--moe-offload",
-               "--moe-gpu-experts", "32", "--moe-threads", "12", "--moe-expert-stats", "s.txt"});
+               "--moe-gpu-experts", "32", "--moe-threads", "12", "--moe-expert-stats", "s.txt",
+               "--moe-static-experts"});
     failures += check(offload.moe_offload.enabled && offload.moe_offload.resident_experts == 32 &&
+                          !offload.moe_offload.dynamic_residency &&
                           offload.moe_offload.host_threads == 12 &&
                           offload.moe_offload.expert_stats == "s.txt",
                       "CLI did not preserve MoE offload options");

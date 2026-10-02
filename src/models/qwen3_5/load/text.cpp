@@ -60,33 +60,6 @@ GdnWeights bind_gdn(Bindings& b, const TextConfig& text, const std::string& p) {
     return out;
 }
 
-// Row ranges of `parameters` inside their single row-split parent, in the given order.
-artifact::ObjectHandle parameter_rows(const Bindings& b, std::span<const WeightId> parameters,
-                                      std::uint64_t columns,
-                                      std::vector<artifact::RowRange>& rows) {
-    std::optional<artifact::ObjectHandle> object;
-    for (const auto id : parameters) {
-        for (const auto& part : b.at(id).reference.binding.parts) {
-            if (object && part.object.index != object->index) {
-                throw artifact::ArtifactError("offloaded expert bank spans several objects");
-            }
-            object = part.object;
-            if (part.begin % columns || part.end % columns) {
-                throw artifact::ArtifactError("offloaded expert rows are not row aligned");
-            }
-            const std::uint64_t begin = part.begin / columns;
-            const std::uint64_t count = (part.end - part.begin) / columns;
-            if (!rows.empty() && rows.back().begin + rows.back().count == begin) {
-                rows.back().count += count;
-            } else {
-                rows.push_back({begin, count});
-            }
-        }
-    }
-    if (!object) { throw artifact::ArtifactError("offloaded expert has no parent"); }
-    return *object;
-}
-
 MoeWeights bind_moe(Bindings& b, const TextConfig& config, const std::string& prefix,
                     const MoeOffloadOptions* offload, const std::vector<std::int32_t>* resident) {
     const auto& moe   = std::get<MoeConfig>(config.ffn);
@@ -110,25 +83,6 @@ MoeWeights bind_moe(Bindings& b, const TextConfig& config, const std::string& pr
     if (offload) {
         MoeOffloadWeights o;
         if (resident) { o.resident = *resident; }
-        if (!o.resident.empty()) {
-            std::vector<WeightId> gate_up;
-            std::vector<WeightId> down;
-            for (const auto e : o.resident) {
-                const auto& expert = out.experts.at(static_cast<std::size_t>(e));
-                gate_up.push_back(expert.gate);
-                gate_up.push_back(expert.up);
-                down.push_back(expert.down);
-            }
-            std::vector<artifact::RowRange> gate_up_rows;
-            std::vector<artifact::RowRange> down_rows;
-            const auto gate_up_object = parameter_rows(b, gate_up, h, gate_up_rows);
-            const auto down_object    = parameter_rows(b, down, ir, down_rows);
-            const std::uint64_t count = o.resident.size();
-            o.device_gate_up = b.replica(p + "offload/device_gate_up", gate_up_object,
-                                         std::move(gate_up_rows), {count * 2 * ir, h});
-            o.device_down    = b.replica(p + "offload/device_down", down_object,
-                                         std::move(down_rows), {count * h, ir});
-        }
         out.offload = std::move(o);
     }
     out.shared = {b.parameter(p + "shared/gate", {shared, h}, {input}),

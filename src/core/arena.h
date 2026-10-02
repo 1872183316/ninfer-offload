@@ -108,6 +108,23 @@ private:
     std::size_t size_ = 0;
 };
 
+// Page-locks an existing host range so device copies from it run asynchronously; the range is
+// unlocked on destruction and must outlive this object.
+class HostPageLock {
+public:
+    HostPageLock() = default;
+    HostPageLock(void* data, std::size_t size_bytes);
+    ~HostPageLock();
+
+    HostPageLock(const HostPageLock&)            = delete;
+    HostPageLock& operator=(const HostPageLock&) = delete;
+    HostPageLock(HostPageLock&& other) noexcept;
+    HostPageLock& operator=(HostPageLock&& other) noexcept;
+
+private:
+    void* data_ = nullptr;
+};
+
 using WorkspaceArena = DeviceArena;
 
 } // namespace ninfer

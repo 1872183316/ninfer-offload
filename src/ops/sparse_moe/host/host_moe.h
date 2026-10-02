@@ -26,9 +26,9 @@ struct HostMoeJob {
     std::int32_t tokens = 0;
     std::int32_t top_k  = 0;
     const float* x      = nullptr;           // [T][H] represented activations as FP32
-    const std::int32_t* ids = nullptr;       // [T][top_k] selected logical expert ids
+    // [T][top_k] selected logical expert ids; a negative entry is computed elsewhere.
+    const std::int32_t* ids = nullptr;
     const float* alpha  = nullptr;           // [T][top_k] normalized routing weights
-    const std::uint8_t* on_host = nullptr;   // [E] nonzero: the host computes this expert
     float* out          = nullptr;           // [T][H] overwritten with the host partial sum
 };
 
@@ -64,8 +64,7 @@ private:
 
 // Computes out[t] = sum over host experts e selected by token t of
 //   alpha[t,e] * W_down[e](SiLU(W_gate[e] x_t) * (W_up[e] x_t))
-// with exact stored-weight decode and FP32 arithmetic. Experts not marked on_host contribute
-// nothing. Scratch storage is owned by the executor and reused across calls.
+// with exact stored-weight decode and FP32 arithmetic. Negative ids contribute nothing. Scratch storage is owned by the executor and reused across calls.
 class HostMoeExecutor {
 public:
     explicit HostMoeExecutor(HostThreadPool& pool) : pool_(pool) {}

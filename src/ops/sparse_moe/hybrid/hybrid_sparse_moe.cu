@@ -86,23 +86,51 @@ __device__ __forceinline__ float warp_dot_f32(const Planes& p, std::int64_t row,
 
 __device__ __forceinline__ float silu(float v) { return v / (1.0F + __expf(-v)); }
 
-struct SlotTable {
-    std::int16_t slot[kHybridMoeMaxExperts];
-};
-
-struct RouteArgs {
+struct LogitArgs {
     const __nv_bfloat16* x;
     const __nv_bfloat16* router; // [E+1, H]
-    int experts, top_k, hidden;
-    int* ids;             // device [T][K]
-    float* alpha;         // device [T][K]
-    float* shared_scale;  // device [T]
-    int* host_ids;        // mapped [T][K]
-    float* host_alpha;    // mapped [T][K]
-    __nv_bfloat16* host_x; // mapped [T][H]
+    int rows, hidden;            // rows = E+1
+    float* logits;               // device [T][E+1]
+    __nv_bfloat16* host_x;       // mapped [T][H]
 };
 
-// One block per token: router logits, exact top-K with lower-id tie break, normalized weights.
+// grid (ceil((E+1)/kWarps), T): one warp per router row (row E is the shared-expert score). Block
+// 0 of each token also publishes the represented input for the host share in 16-byte stores.
+__global__ void __launch_bounds__(kThreads) router_logits_kernel(LogitArgs a) {
+    const int t    = static_cast<int>(blockIdx.y);
+    const int r    = static_cast<int>(blockIdx.x) * kWarps + (static_cast<int>(threadIdx.x) >> 5);
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const __nv_bfloat16* xt = a.x + static_cast<std::int64_t>(t) * a.hidden;
+    if (blockIdx.x == 0) {
+        const uint4* src = reinterpret_cast<const uint4*>(xt);
+        uint4* dst = reinterpret_cast<uint4*>(a.host_x + static_cast<std::int64_t>(t) * a.hidden);
+        for (int k = static_cast<int>(threadIdx.x); k < a.hidden / 8; k += kThreads) dst[k] = src[k];
+    }
+    if (r >= a.rows) return;
+    const __nv_bfloat16* row = a.router + static_cast<std::int64_t>(r) * a.hidden;
+    float acc = 0.0F;
+    for (int k = lane * 2; k < a.hidden; k += 64) {
+        const float2 w = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(row + k));
+        const float2 v = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(xt + k));
+        acc            = fmaf(w.x, v.x, fmaf(w.y, v.y, acc));
+    }
+    acc = warp_reduce_sum(acc);
+    if (lane == 0) a.logits[static_cast<std::int64_t>(t) * a.rows + r] = acc;
+}
+
+struct RouteArgs {
+    const float* logits;         // device [T][E+1]
+    int experts, top_k;
+    const volatile std::int16_t* map; // mapped [E]: slot holding the expert, or -1
+    int* slots;           // device [T][K]: slot computing the selection, or -1
+    float* alpha;         // device [T][K]
+    float* shared_scale;  // device [T]
+    int* host_ids;        // mapped [T][K]: id, or -1 - id when a slot computes it
+    float* host_alpha;    // mapped [T][K]
+};
+
+// One block per token: exact top-K with lower-id tie break, normalized weights, and the slot
+// lookup that splits the selection between device and host.
 __global__ void __launch_bounds__(kThreads) route_kernel(RouteArgs a) {
     __shared__ float logits[kHybridMoeMaxExperts + 1];
     __shared__ float red_value[kWarps];
@@ -112,23 +140,8 @@ __global__ void __launch_bounds__(kThreads) route_kernel(RouteArgs a) {
     const int t    = static_cast<int>(blockIdx.x);
     const int warp = static_cast<int>(threadIdx.x) >> 5;
     const int lane = static_cast<int>(threadIdx.x) & 31;
-    const __nv_bfloat16* xt = a.x + static_cast<std::int64_t>(t) * a.hidden;
-
-    for (int r = warp; r <= a.experts; r += kWarps) {
-        const __nv_bfloat16* row = a.router + static_cast<std::int64_t>(r) * a.hidden;
-        float acc = 0.0F;
-        for (int k = lane * 2; k < a.hidden; k += 64) {
-            const float2 w = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(row + k));
-            const float2 v = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(xt + k));
-            acc            = fmaf(w.x, v.x, fmaf(w.y, v.y, acc));
-        }
-        acc = warp_reduce_sum(acc);
-        if (lane == 0) logits[r] = acc;
-    }
-    // Publish the represented input for the host share while the router finishes.
-    for (int k = static_cast<int>(threadIdx.x); k < a.hidden; k += kThreads) {
-        a.host_x[static_cast<std::int64_t>(t) * a.hidden + k] = xt[k];
-    }
+    const float* lt = a.logits + static_cast<std::int64_t>(t) * (a.experts + 1);
+    for (int r = static_cast<int>(threadIdx.x); r <= a.experts; r += kThreads) logits[r] = lt[r];
     __syncthreads();
 
     for (int s = 0; s < a.top_k; ++s) {
@@ -177,20 +190,25 @@ __global__ void __launch_bounds__(kThreads) route_kernel(RouteArgs a) {
         for (int s = 0; s < a.top_k; ++s) {
             const int o      = t * a.top_k + s;
             const float w    = expf(chosen[s] - top) / sum;
-            a.ids[o]         = chosen_id[s];
             a.alpha[o]       = w;
-            a.host_ids[o]    = chosen_id[s];
             a.host_alpha[o]  = w;
         }
         a.shared_scale[t] = 1.0F / (1.0F + expf(-logits[a.experts]));
+    }
+    // One read of the live map per selection: this value alone decides which side computes it.
+    if (static_cast<int>(threadIdx.x) < a.top_k) {
+        const int o    = t * a.top_k + static_cast<int>(threadIdx.x);
+        const int id   = chosen_id[threadIdx.x];
+        const int slot = a.map[id];
+        a.slots[o]     = slot;
+        a.host_ids[o]  = slot >= 0 ? -1 - id : id;
     }
 }
 
 struct ExpertArgs {
     const __nv_bfloat16* x;
     Planes device_gate_up, shared_gate_up;
-    SlotTable slots;
-    const int* ids;
+    const int* slots;
     int top_k, hidden, intermediate, shared_intermediate, act_stride;
     float* act; // [T][K+1][act_stride]
 };
@@ -210,7 +228,7 @@ __global__ void __launch_bounds__(kThreads) expert_act_kernel(ExpertArgs a) {
         g = warp_dot_bf16(a.shared_gate_up, j, xt, a.hidden);
         u = warp_dot_bf16(a.shared_gate_up, a.shared_intermediate + j, xt, a.hidden);
     } else {
-        const int slot = a.slots.slot[a.ids[t * a.top_k + path]];
+        const int slot = a.slots[t * a.top_k + path];
         if (slot < 0) return;
         const std::int64_t base = static_cast<std::int64_t>(slot) * 2 * a.intermediate;
         g = warp_dot_bf16(a.device_gate_up, base + j, xt, a.hidden);
@@ -224,8 +242,7 @@ __global__ void __launch_bounds__(kThreads) expert_act_kernel(ExpertArgs a) {
 
 struct DownArgs {
     Planes device_down, shared_down;
-    SlotTable slots;
-    const int* ids;
+    const int* slots;
     const float* alpha;
     const float* shared_scale;
     const float* act;
@@ -243,7 +260,7 @@ __global__ void __launch_bounds__(kThreads) expert_down_kernel(DownArgs a) {
                 warp_dot_f32(a.shared_down, r, act_t + static_cast<std::int64_t>(a.top_k) * a.act_stride,
                              a.shared_intermediate);
     for (int s = 0; s < a.top_k; ++s) {
-        const int slot = a.slots.slot[a.ids[t * a.top_k + s]];
+        const int slot = a.slots[t * a.top_k + s];
         if (slot < 0) continue;
         sum += a.alpha[t * a.top_k + s] *
                warp_dot_f32(a.device_down, static_cast<std::int64_t>(slot) * a.hidden + r,
@@ -274,6 +291,7 @@ std::size_t hybrid_sparse_moe_workspace_bytes(const HybridSparseMoeWeights& w,
     const std::size_t K = static_cast<std::size_t>(w.top_k);
     std::size_t bytes   = 0;
     const auto add      = [&](std::size_t n) { bytes += (n + 255) / 256 * 256; };
+    add(T * static_cast<std::size_t>(w.experts + 1) * sizeof(float));
     add(T * K * sizeof(int));
     add(T * K * sizeof(float));
     add(T * sizeof(float));
@@ -299,30 +317,32 @@ void hybrid_sparse_moe(const Tensor& x, const HybridSparseMoeWeights& w,
 
     auto scope          = workspace.scope();
     const int K         = w.top_k;
-    Tensor ids          = workspace.alloc(DType::I32, {K, T});
+    Tensor logits       = workspace.alloc(DType::FP32, {w.experts + 1, T});
+    Tensor slot_of      = workspace.alloc(DType::I32, {K, T});
     Tensor alpha        = workspace.alloc(DType::FP32, {K, T});
     Tensor shared_scale = workspace.alloc(DType::FP32, {T});
     const int stride    = act_stride(w);
     Tensor act          = workspace.alloc(DType::FP32, {stride, (K + 1) * T});
     Tensor partial      = workspace.alloc(DType::FP32, {w.hidden, T});
 
-    SlotTable slots{};
-    for (int e = 0; e < kHybridMoeMaxExperts; ++e) {
-        slots.slot[e] = e < w.experts ? w.slot_of_expert[static_cast<std::size_t>(e)] : -1;
-    }
+    const auto& layer  = host.layers.at(static_cast<std::size_t>(w.layer));
     const auto mailbox = host.device_mailbox();
 
-    RouteArgs route{static_cast<const __nv_bfloat16*>(x.data),
-                    static_cast<const __nv_bfloat16*>(w.router_shared_gate.qdata),
+    LogitArgs la{static_cast<const __nv_bfloat16*>(x.data),
+                 static_cast<const __nv_bfloat16*>(w.router_shared_gate.qdata), w.experts + 1,
+                 w.hidden, static_cast<float*>(logits.data), mailbox.x};
+    router_logits_kernel<<<dim3((w.experts + 1 + kWarps - 1) / kWarps, T), kThreads, 0, stream>>>(
+        la);
+    check(cudaGetLastError(), "router logits launch");
+    RouteArgs route{static_cast<const float*>(logits.data),
                     w.experts,
                     K,
-                    w.hidden,
-                    static_cast<int*>(ids.data),
+                    layer.device_map,
+                    static_cast<int*>(slot_of.data),
                     static_cast<float*>(alpha.data),
                     static_cast<float*>(shared_scale.data),
                     mailbox.ids,
-                    mailbox.alpha,
-                    mailbox.x};
+                    mailbox.alpha};
     route_kernel<<<T, kThreads, 0, stream>>>(route);
     check(cudaGetLastError(), "route launch");
     // Header words are baked into the captured graph as constants for this layer and T.
@@ -332,12 +352,11 @@ void hybrid_sparse_moe(const Tensor& x, const HybridSparseMoeWeights& w,
           "publish tokens");
     check(cuStreamWriteValue32(stream, mailbox.request_word, 1, 0), "publish request");
 
-    const bool any_resident = w.device_gate_up.qdata != nullptr;
+    const bool any_slot = layer.slots.slots > 0;
     ExpertArgs ea{static_cast<const __nv_bfloat16*>(x.data),
-                  any_resident ? planes(w.device_gate_up) : planes(w.shared_gate_up),
+                  any_slot ? planes(layer.slots.gate_up) : planes(w.shared_gate_up),
                   planes(w.shared_gate_up),
-                  slots,
-                  static_cast<const int*>(ids.data),
+                  static_cast<const int*>(slot_of.data),
                   K,
                   w.hidden,
                   w.intermediate,
@@ -348,10 +367,9 @@ void hybrid_sparse_moe(const Tensor& x, const HybridSparseMoeWeights& w,
     expert_act_kernel<<<dim3((width + kWarps - 1) / kWarps, T * (K + 1)), kThreads, 0, stream>>>(
         ea);
     check(cudaGetLastError(), "expert act launch");
-    DownArgs da{any_resident ? planes(w.device_down) : planes(w.shared_down),
+    DownArgs da{any_slot ? planes(layer.slots.down) : planes(w.shared_down),
                 planes(w.shared_down),
-                slots,
-                static_cast<const int*>(ids.data),
+                static_cast<const int*>(slot_of.data),
                 static_cast<const float*>(alpha.data),
                 static_cast<const float*>(shared_scale.data),
                 static_cast<const float*>(act.data),

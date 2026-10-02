@@ -51,11 +51,9 @@ struct DenseWeights {
     WeightId gate, up, down;
 };
 
-// Host-resident routed experts with an optional device replica of selected experts. Replica slot
-// s holds expert resident[s]; its gate/up rows are [s*2I, (s+1)*2I) and down rows [s*H, (s+1)*H).
+// Host-resident routed experts; `resident` lists the experts given device slots at startup.
 struct MoeOffloadWeights {
     std::vector<std::int32_t> resident;
-    WeightId device_gate_up, device_down; // valid when resident is non-empty
 };
 
 struct MoeWeights {
