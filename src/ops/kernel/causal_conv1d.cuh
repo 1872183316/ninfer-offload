@@ -414,6 +414,51 @@ __global__ void causal_conv1d_batched_sequence_snapshot_kernel(
     }
 }
 
+// Record form: the same recurrence from the initial window without writing state. Each valid
+// raw input column is copied to conv_record for a later ReplaySSM fold.
+template <bool Masked>
+__global__ void causal_conv1d_batched_sequence_record_kernel(
+    const __nv_bfloat16* x, const __nv_bfloat16* weight, const __nv_bfloat16* conv_states,
+    const std::int32_t* valid_columns, const std::int32_t* initial_state_slots,
+    __nv_bfloat16* conv_record, __nv_bfloat16* out, std::int32_t C, std::int32_t width,
+    std::int64_t slot_stride) {
+    const std::int32_t batch = static_cast<std::int32_t>(blockIdx.y);
+    const std::int64_t c64   = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
+    const std::int64_t C64   = static_cast<std::int64_t>(C);
+    if (c64 >= C64) { return; }
+
+    const std::int32_t valid = Masked ? valid_columns[batch] : width;
+    const __nv_bfloat16* init =
+        conv_states + static_cast<std::int64_t>(initial_state_slots[batch]) * slot_stride;
+    __nv_bfloat16 s0            = init[c64];
+    __nv_bfloat16 s1            = init[C64 + c64];
+    __nv_bfloat16 s2            = init[2 * C64 + c64];
+    const float w0              = __bfloat162float(weight[c64]);
+    const float w1              = __bfloat162float(weight[C64 + c64]);
+    const float w2              = __bfloat162float(weight[2 * C64 + c64]);
+    const float w3              = __bfloat162float(weight[3 * C64 + c64]);
+    const std::int64_t row_base = static_cast<std::int64_t>(batch) * width * C64;
+
+    for (std::int32_t column = 0; column < width; ++column) {
+        const std::int64_t idx = row_base + static_cast<std::int64_t>(column) * C64 + c64;
+        if (column >= valid) {
+            out[idx] = __float2bfloat16(0.0f);
+            continue;
+        }
+        const __nv_bfloat16 x0 = x[idx];
+        float acc              = 0.0f;
+        acc += w0 * __bfloat162float(s0);
+        acc += w1 * __bfloat162float(s1);
+        acc += w2 * __bfloat162float(s2);
+        acc += w3 * __bfloat162float(x0);
+        out[idx]         = __float2bfloat16_rn(silu(acc));
+        conv_record[idx] = x0;
+        s0               = s1;
+        s1               = s2;
+        s2               = x0;
+    }
+}
+
 // Small-T snapshot form. A CTA owns all token outputs for one channel tile. The selected history
 // is cached before any snapshot slot is written, so initial_slot may name any slot, including one
 // overwritten by this call.

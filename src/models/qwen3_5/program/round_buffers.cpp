@@ -132,12 +132,14 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
         return add_tensor(builder, DType::I32, {count}, label);
     };
     if (layout.spec.backend == SpeculativeBackend::Mtp) {
+        const std::int32_t mtp_hidden =
+            layout.spec.mtp_hidden != 0 ? layout.spec.mtp_hidden : layout.spec.hidden;
         layout.mtp.emplace();
         const auto ar_steps =
             checked_i32(std::max<std::uint64_t>(1ULL, layout.spec.draft_window - 1ULL),
                         "RoundState MTP AR steps exceed int32");
         layout.mtp->position         = i32(1, "MTP prefill autoregressive position");
-        layout.mtp->ar_hidden        = add_tensor(builder, DType::BF16, {layout.spec.hidden, 1},
+        layout.mtp->ar_hidden        = add_tensor(builder, DType::BF16, {mtp_hidden, 1},
                                                   "MTP prefill autoregressive hidden");
         layout.mtp->draft_tokens     = i32(drafts, "MTP prefill draft tokens");
         layout.mtp->target_input_ids = i32(columns, "MTP prefill target input ids");
@@ -159,21 +161,21 @@ void complete_round_state_layout(LayoutBuilder& builder, RoundStateLayout& layou
             add_tensor(builder, DType::BF16, {layout.spec.output_rows, columns, batch},
                        "MTP decode target logits");
         decode.target_hidden = add_tensor(
-            builder, DType::BF16, {layout.spec.hidden, columns, batch}, "MTP decode target hidden");
+            builder, DType::BF16, {mtp_hidden, columns, batch}, "MTP decode target hidden");
         decode.target_continuation_hidden =
-            add_tensor(builder, DType::BF16, {layout.spec.hidden, batch},
+            add_tensor(builder, DType::BF16, {mtp_hidden, batch},
                        "MTP decode target continuation hidden");
         decode.proposal_logits = add_tensor(builder, DType::BF16, {layout.spec.output_rows, batch},
                                             "MTP decode proposal logits");
         decode.alignment_ids =
             add_tensor(builder, DType::I32, {columns, batch}, "MTP decode alignment ids");
         decode.alignment_hidden =
-            add_tensor(builder, DType::BF16, {layout.spec.hidden, columns, batch},
+            add_tensor(builder, DType::BF16, {mtp_hidden, columns, batch},
                        "MTP decode alignment hidden");
-        decode.ar_hidden = add_tensor(builder, DType::BF16, {layout.spec.hidden, batch},
+        decode.ar_hidden = add_tensor(builder, DType::BF16, {mtp_hidden, batch},
                                       "MTP decode autoregressive hidden");
         decode.next_hidden =
-            add_tensor(builder, DType::BF16, {layout.spec.hidden, batch}, "MTP decode next hidden");
+            add_tensor(builder, DType::BF16, {mtp_hidden, batch}, "MTP decode next hidden");
         decode.ar_positions      = add_tensor(builder, DType::I32, {batch, ar_steps},
                                               "MTP decode autoregressive positions");
         decode.ar_rope_positions = add_tensor(builder, DType::I32, {batch, ar_steps},

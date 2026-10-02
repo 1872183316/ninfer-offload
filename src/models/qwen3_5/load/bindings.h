@@ -63,10 +63,17 @@ private:
                                       const std::vector<std::int32_t>* resident = nullptr);
 [[nodiscard]] TextWeights bind_text(Bindings& bindings, const TextConfig& config,
                                     const LoadOptions& options);
+[[nodiscard]] HyperWeights bind_hyper(Bindings& bindings, const TextConfig& config,
+                                      const std::string& prefix, bool inject);
+[[nodiscard]] BlockWeights bind_qwen4exp_block(Bindings& bindings, const TextConfig& config,
+                                               const std::string& prefix, MixerKind mixer,
+                                               std::uint32_t layer,
+                                               const MoeOffloadOptions* offload,
+                                               const std::vector<std::int32_t>* resident);
 [[nodiscard]] VisionWeights bind_vision(Bindings& bindings, const VisionConfig& config,
                                         const TextConfig& target);
 [[nodiscard]] MtpWeights bind_mtp(Bindings& bindings, const TextConfig& config,
-                                  const TextWeights& target);
+                                  const TextWeights& target, const LoadOptions& options);
 [[nodiscard]] DraftWeights bind_draft(Bindings& bindings, const DraftConfig& config,
                                       const TextConfig& target, const TextWeights& weights,
                                       const std::string& component);

@@ -19,6 +19,8 @@ inline constexpr std::uint32_t kDFlashDecodeMaximumWidth  = kDFlashDecodeMaximum
 
 struct RoundStateSpec {
     std::int32_t hidden          = 0;
+    // Width of the hidden that conditions MTP (Qwen4-Exp: the wide stream); 0 means `hidden`.
+    std::int32_t mtp_hidden      = 0;
     std::int32_t output_rows     = 0;
     std::uint32_t batch_capacity = 1;
     std::uint32_t draft_window   = 0;

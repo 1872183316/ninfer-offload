@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace ninfer {
 
@@ -17,6 +18,9 @@ struct GdnReplayRecordSpec {
     std::int32_t value_heads     = 0;
     std::int32_t key_dim         = 0;
     std::int32_t value_dim       = 0;
+    // Optional Qwen4-Exp PLE transitions: raw convolution inputs BF16 [ple_channels,width,rows]
+    // and token ids I32 [width,rows]; 0 means absent.
+    std::int32_t ple_channels    = 0;
 };
 
 struct GdnReplayRecordLayout {
@@ -25,6 +29,8 @@ struct GdnReplayRecordLayout {
     TensorRegion key;
     TensorRegion value;
     TensorRegion gate;
+    std::optional<TensorRegion> ple_conv;
+    std::optional<TensorRegion> ple_ids;
 
     [[nodiscard]] std::size_t payload_bytes() const noexcept;
 };
@@ -50,6 +56,8 @@ struct GdnReplayRecords {
     Tensor key;
     Tensor value;
     Tensor gate;
+    Tensor ple_conv; // empty unless spec.ple_channels > 0
+    Tensor ple_ids;
     GdnReplayRecordSpec spec;
 
     GdnReplayRecords() = default;

@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <span>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -310,6 +311,94 @@ void conv() {
     expect("ple_dilated_conv_silu (4+3 via state)", split, ref);
 }
 
+// Speculative verify: record mode (no state write) followed by ple_replay_fold of an accepted
+// prefix must reproduce the state the writing Ops leave after that prefix.
+void replay_fold() {
+    const int C = 64, K = 4, D = 3, hist = (K - 1) * D, W = 4, P = 5;
+    ops::PleHash h;
+    h.ngram_size      = 3;
+    h.heads_per_ngram = 8;
+    h.eos             = 248044;
+    const std::uint64_t mult[3] = {23703573157769ULL, 20109073645365ULL, 8052911324071ULL};
+    for (int i = 0; i < 3; ++i) h.multipliers[i] = mult[i];
+    std::uint64_t off = 0;
+    for (int j = 0; j < 16; ++j) {
+        h.vocab[j]  = 20000003ULL + 20ULL * j + (j % 3);
+        h.offset[j] = off;
+        off += h.vocab[j];
+    }
+    const std::int64_t conv_bytes = std::int64_t(hist) * C * 2;
+    const std::int64_t pitch      = conv_bytes + 64;
+    const int slots               = 4;
+    Dev<std::uint8_t> pool(static_cast<std::size_t>(pitch) * slots);
+    const ops::PleStateView view{pool.p, pitch, 0, conv_bytes};
+    const auto w = random_bf16(std::size_t(K) * C, 21, 1.0F);
+    Dev<std::uint16_t> dw(w);
+    Tensor tw(dw.p, DType::BF16, {C, K});
+    auto slot = [](std::int32_t index) { return std::vector<std::int32_t>{index}; };
+    // Prefill slot 0 with P tokens from the zero state (slot 3 stays zero).
+    {
+        const auto xp = random_bf16(std::size_t(C) * P, 22, 2.0F);
+        const std::vector<std::int32_t> idp = {11, 248044, 900, 77, 5};
+        Dev<std::uint16_t> dx(xp), dout(xp.size());
+        Dev<std::int32_t> did(idp), dsrc(slot(3)), ddst(slot(0)), drows(std::size_t(16) * P);
+        Tensor tx(dx.p, DType::BF16, {C, P, 1}), tout(dout.p, DType::BF16, {C, P, 1});
+        Tensor tid(did.p, DType::I32, {P, 1}), tsrc(dsrc.p, DType::I32, {1}),
+            tdst(ddst.p, DType::I32, {1}), trows(drows.p, DType::I32, {16, P, 1});
+        ops::ple_dilated_conv_silu(tx, tw, D, Tensor{}, view, tsrc, tdst, tout, nullptr);
+        ops::ple_ngram_rows(tid, Tensor{}, h, view, tsrc, tdst, trows, nullptr);
+    }
+    const auto x = random_bf16(std::size_t(C) * W, 23, 2.0F);
+    const std::vector<std::int32_t> ids = {42, 248044, 43, 44};
+    Dev<std::uint16_t> dx(x), drec_out(x.size());
+    Dev<std::int32_t> did(ids), d0(slot(0)), drec_rows(std::size_t(16) * W);
+    Tensor tx(dx.p, DType::BF16, {C, W, 1}), trec_out(drec_out.p, DType::BF16, {C, W, 1});
+    Tensor tid(did.p, DType::I32, {W, 1}), t0(d0.p, DType::I32, {1}),
+        trec_rows(drec_rows.p, DType::I32, {16, W, 1});
+    const auto before = pool.get();
+    ops::ple_dilated_conv_silu(tx, tw, D, Tensor{}, view, t0, Tensor{}, trec_out, nullptr);
+    ops::ple_ngram_rows(tid, Tensor{}, h, view, t0, Tensor{}, trec_rows, nullptr);
+    int bad = pool.get() != before ? 1 : 0; // record mode writes no state
+    const auto rec_out  = drec_out.get();
+    const auto rec_rows = drec_rows.get();
+    for (int commit : {1, 2, 4}) {
+        // Expected: the writing Ops over the accepted prefix, slot 0 -> slot 1.
+        std::vector<std::uint16_t> xp(x.begin(), x.begin() + std::size_t(commit) * C);
+        std::vector<std::int32_t> idp(ids.begin(), ids.begin() + commit);
+        Dev<std::uint16_t> dxp(xp), doutp(xp.size());
+        Dev<std::int32_t> didp(idp), d1(slot(1)), drowsp(std::size_t(16) * commit);
+        Tensor txp(dxp.p, DType::BF16, {C, commit, 1}), toutp(doutp.p, DType::BF16, {C, commit, 1});
+        Tensor tidp(didp.p, DType::I32, {commit, 1}), t1(d1.p, DType::I32, {1}),
+            trowsp(drowsp.p, DType::I32, {16, commit, 1});
+        ops::ple_dilated_conv_silu(txp, tw, D, Tensor{}, view, t0, t1, toutp, nullptr);
+        ops::ple_ngram_rows(tidp, Tensor{}, h, view, t0, t1, trowsp, nullptr);
+        // Record-mode outputs equal the writing Ops on the accepted columns.
+        const auto exp_out  = doutp.get();
+        const auto exp_rows = drowsp.get();
+        bad += !std::equal(exp_out.begin(), exp_out.end(), rec_out.begin());
+        bad += !std::equal(exp_rows.begin(), exp_rows.end(), rec_rows.begin());
+        // Folded: slot 0 -> slot 2 from the records.
+        const ops::PleReplayFoldRow row{0, 2, commit};
+        ops::ple_replay_fold(tx, tid, K, D, h.ngram_size, view,
+                             std::span<const ops::PleReplayFoldRow>(&row, 1), nullptr);
+        const auto state = pool.get();
+        const auto* s1   = state.data() + pitch;
+        const auto* s2   = state.data() + 2 * pitch;
+        bad += !std::equal(s1, s1 + conv_bytes, s2); // convolution history: bit-identical
+        // Token history: the next token hashes identically from both states.
+        Dev<std::int32_t> dprobe(std::vector<std::int32_t>{7}), da(slot(1)), db(slot(2)), dra(16),
+            drb(16);
+        Tensor tprobe(dprobe.p, DType::I32, {1, 1}), ta(da.p, DType::I32, {1}),
+            tb(db.p, DType::I32, {1}), tra(dra.p, DType::I32, {16, 1, 1}),
+            trb(drb.p, DType::I32, {16, 1, 1});
+        ops::ple_ngram_rows(tprobe, Tensor{}, h, view, ta, Tensor{}, tra, nullptr);
+        ops::ple_ngram_rows(tprobe, Tensor{}, h, view, tb, Tensor{}, trb, nullptr);
+        bad += dra.get() != drb.get();
+    }
+    std::printf("%s ple record mode + replay fold\n", bad ? "FAIL" : "ok  ");
+    failures += bad;
+}
+
 } // namespace
 
 int main() {
@@ -321,6 +410,7 @@ int main() {
     hyper_pieces();
     ngram();
     conv();
+    replay_fold();
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;
 }

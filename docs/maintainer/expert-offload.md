@@ -87,7 +87,7 @@ its output rows. Kernels require AVX2, FMA, F16C and BMI2, checked at startup.
   the GPU then applies the key/value projections, the stream gate and the dilated convolution
   (`ops::ple_gate`, `ops::ple_dilated_conv_silu`). The convolution and token history live in one
   extra pseudo layer of the Linear Attention state pool, so checkpoints and slot copies include it.
-- Qwen4-Exp requires `--moe-offload`; MTP and other speculative backends are not implemented.
+- Qwen4-Exp requires `--moe-offload`; `--spec mtp` is the only speculative backend (see below).
 
 Conversion streams the byte ranges of the BF16 checkpoint that upcoming jobs read from ModelScope
 (`tools/convert/sources/streaming.py`; disk use bounded by `--stream-budget-gb` plus the output):
@@ -159,3 +159,74 @@ The first QSA attention kernel used one CTA per KV head and cost about 5% of dec
 1,777 tokens; splitting each column's tokens over up to 32 CTAs reduced that to about 1.2%. The
 remainder is the index projection and the selection launches, which also run while every block is
 selected.
+
+### MTP speculative decoding
+
+An artifact converted with `--components text,mtp` (1.5 GB more; `--reuse` adds it to an existing
+text-only conversion) enables `--spec mtp --draft-tokens N`. The predictor follows the reference
+`Qwen4ExpMTP` module: `u = fc_embedding(rmsnorm(emb(x[t+1]))) + fc_hidden(rmsnorm(w[t]))` per
+stream, where `w[t]` is the target's final wide stream `[4H]` before the head mixer, then one full
+attention block with its own QSA indexer and a 512-expert MoE, its own head mixer and the shared
+output head; the pair `(w[t], x[t+1])` uses RoPE position `t`
+(`TextContext::qwen4exp_mtp_core`, `src/models/qwen3_5/execution/qwen4exp.cpp`). The MTP
+condition is therefore the wide stream: prefill and verify capture it and the MTP hidden buffers,
+checkpoint images and round state are `hc_count * H` wide.
+
+- **Placement.** The MTP routed experts are host runtime layer 48 (after the 48 Text layers) with
+  no GPU replicas; the other MTP weights (0.1 GiB) and the MTP KV pool (with its QSA index plane)
+  are on the GPU.
+- **Verify and state commit.** A round runs the target over `k+1` columns with
+  `GdnStateAction::RecordForReplay`: GDN layers record their convolution inputs and recurrence
+  inputs (`causal_conv1d_silu_record`, `gated_delta_net_replay_record`), the PLE layer records its
+  gated convolution inputs and token ids, and after greedy acceptance on the device
+  `GdnReplayFoldPlan` (registered for the 36-layer 16K/48V geometry) and `ops::ple_replay_fold`
+  commit exactly the accepted columns into the state slots. Rejected columns never touch committed
+  state.
+- **Prefill.** Every prompt column runs the MTP stem and attention (appending its MTP K/V and
+  index keys); only the final column, whose output feeds the first proposal, runs the MoE stage.
+- `ninfer_hyper_connection_test` checks `ple_replay_fold` and `ninfer_causal_conv1d_silu_test` the
+  record kernel against naive oracles; `ninfer_gdn_replay_fold_test` covers the Flash-Next fold
+  geometry. `tools/validate/qwen4exp_mtp_reference.py` is an FP32 reference of the predictor.
+
+Draft acceptance of the FP32 reference predictor on four engine-generated sequences (accepted
+fraction at draft positions 1/2/3): translation 84/75/71%, code edit 95/94/94%, essay 57/52/49%,
+explanation 85/81/81%.
+
+Decode speed through `ninfer-serve` (same host and prompts as above, 64 resident experts,
+`--max-context 2048`, greedy, mean of two repetitions; repetitions differ by at most 0.5 tok/s):
+
+| prompt | no MTP | 1 draft | 2 drafts | 3 drafts |
+|---|---|---|---|---|
+| essay | 14.29 | 14.74 (+3%) | 13.61 (-5%) | 11.26 (-21%) |
+| code edit | 12.61 | 15.16 (+20%) | 16.65 (+32%) | 17.55 (+39%) |
+| translation | 13.30 | 15.77 (+19%) | 15.51 (+17%) | 14.97 (+13%) |
+| explanation | 13.69 | 16.65 (+22%) | 17.49 (+28%) | 16.87 (+23%) |
+| draft acceptance (essay / code / translation / explanation) | | 59/95/83/88% | 45/93/70/79% | 32/92/62/68% |
+
+A round with more drafts reads more distinct host experts (the union of experts over 2/3/4
+consecutive tokens is 1.67/2.25/2.79 times one token's), so extra drafts pay off only at high
+acceptance. One draft was faster than no MTP on every prompt and is `ninfer-run`'s default; two or
+three drafts are faster for code and slower for free-form prose. MTP adds about 0.1 GiB of device
+memory and 1.4 GB of host memory.
+
+Greedy MTP output is not bit-identical to greedy output without MTP: a verify round computes
+`k+1` columns at once, which changes GEMM and MoE batching and occasionally flips a routing or a
+top-1 choice. On the translation prompt all 112 tokens were identical for one and two drafts and
+on the code-edit prompt (`ninfer`, 48 resident experts) 256 tokens were identical for two drafts; the essay diverged at token 71
+(one draft) and 128 (two drafts). Teacher-forcing each full essay output through the FP32
+reference, the engine's token differs from the reference argmax at 23 of 390 positions without MTP
+(13 by more than 0.5 nats, mean NLL 0.435), 15 of 378 with one draft (5; 0.377) and 27 of 396 with
+two drafts (15; 0.445). The divergence points are such engine-versus-reference disagreements (1.38
+and 1.46 nats, one in each route), so MTP does not measurably change agreement with the
+reference; the size of these disagreements in every route is a property of the offload engine's
+numerics that this work did not investigate.
+
+MTP works above the dense limit and with concurrent requests: with `--max-context 4096
+--max-concurrency 2` and one draft, a 3,345-token prompt whose passkey appears only in its first
+sentence is answered correctly alone and while a second request decodes; the concurrent code-edit
+request decodes at 14.3 tok/s against 12.2 without MTP (alone: 15.4 against 12.7). Prefill of a
+3,348-token prompt (three prompts per server, different first sentences) runs at 34.7/36.4/36.6
+tok/s with MTP against 35.3/37.1/37.2 without, about 1-2% slower. An earlier version ran the MTP
+MoE over every prompt column; it prefilled at 35.4-36.2 tok/s once warm but only 25.5-26.4 tok/s on
+the first long prompt after startup (reproduced three times; not reproduced without MTP). That
+penalty disappeared with the final-column MoE; its exact cause was not established.

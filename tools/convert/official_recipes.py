@@ -175,7 +175,10 @@ def qwen3_8_27b_nvfp4(model, recipe, sources):
 
 
 def qwen3_8_flash_next(model, recipe, sources):
-    """Qwen4-Exp: Q4 expert gate/up, Q5 expert down, Q5 n-gram table, Q8 other projections."""
+    """Qwen4-Exp: Q4 expert gate/up, Q5 expert down, Q5 n-gram table, Q8 other projections.
+
+    The same assignment covers the optional MTP layer and stem.
+    """
     if model.config.get("model_type") != "qwen4_exp_text":
         raise ValueError("this official recipe requires Qwen4-Exp mathematics")
     _assign(recipe, "text/token_embedding", Q8)
@@ -184,7 +187,7 @@ def qwen3_8_flash_next(model, recipe, sources):
         if name.endswith("/ple/table"):
             _assign(recipe, name, Q5)
             continue
-        if not name.startswith("text/") or not parameter.projection:
+        if not name.startswith(("text/", "mtp/")) or not parameter.projection:
             continue
         if name in ("text/token_embedding", "text/output_head"):
             continue

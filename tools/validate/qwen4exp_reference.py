@@ -331,7 +331,8 @@ class Model:
         score = torch.sigmoid(h @ self.w.get(p + "shared_score", (1, H)).T)
         return out + score * shared
 
-    def forward(self, ids: list[int]) -> torch.Tensor:
+    def forward(self, ids: list[int], return_wide: bool = False):
+        """Logits [T,V]; with return_wide also the final wide stream [T,hc*H] before head_hc."""
         c = self.cfg
         H, n, V = c["hidden_size"], c["hc_count"], c["vocab_size"]
         emb = torch.stack([self.w.rows("text/token_embedding", i, 1, H)[0] for i in ids])
@@ -350,7 +351,7 @@ class Model:
             print(f"layer {i} done", flush=True)
         final = self.hyper("text/head_hc/", x, False)
         head = self.w.get("text/output_head", (V, H), cache=False)
-        return final @ head.T
+        return (final @ head.T, x) if return_wide else final @ head.T
 
 
 def main() -> None:

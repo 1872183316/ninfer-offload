@@ -89,11 +89,22 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     {
         std::int32_t hidden = 0;
         std::int32_t top_k  = 0;
+        // Host MoE layers in ordinal order: the Text stack, then the Qwen4-Exp MTP layer.
+        std::vector<const ops::HybridSparseMoeWeights*> offloaded;
         for (const auto& layer : parameters.text.layers) {
             if (const auto* h = std::get_if<ops::HybridSparseMoeWeights>(&layer.ffn)) {
-                hidden = std::max(hidden, h->hidden);
-                top_k  = std::max(top_k, h->top_k);
+                offloaded.push_back(h);
             }
+        }
+        if (parameters.qwen4_mtp) {
+            if (const auto* h =
+                    std::get_if<ops::HybridSparseMoeWeights>(&parameters.qwen4_mtp->layer.ffn)) {
+                offloaded.push_back(h);
+            }
+        }
+        for (const auto* h : offloaded) {
+            hidden = std::max(hidden, h->hidden);
+            top_k  = std::max(top_k, h->top_k);
         }
         const execution::PleParameters* ple = nullptr;
         for (const auto& layer : parameters.text.layers) {
@@ -116,11 +127,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
             const auto max_tokens = static_cast<std::int32_t>(
                 std::max(prefill_chunk, max_concurrency * (draft_window + 1U)));
             host_moe = std::make_unique<ops::HybridMoeHostRuntime>(threads, max_tokens, hidden, top_k);
-            for (const auto& layer : parameters.text.layers) {
-                if (const auto* h = std::get_if<ops::HybridSparseMoeWeights>(&layer.ffn)) {
-                    if (host_moe->add_layer(*h) != h->layer) {
-                        throw std::logic_error("offloaded MoE layer order differs from parameters");
-                    }
+            for (const auto* h : offloaded) {
+                if (host_moe->add_layer(*h) != h->layer) {
+                    throw std::logic_error("offloaded MoE layer order differs from parameters");
                 }
             }
             if (ple) {
@@ -198,7 +207,11 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     pressure_state_scratch_.reserve(static_cast<std::size_t>(logical_state_capacity));
     if (plan.persistent.replay_records) {
         replay_records.emplace(backing, *plan.persistent.replay_records);
-        replay_fold.emplace(*replay_records, state_images->linear().all_layers_view());
+        // Qwen4-Exp keeps its PLE state in a pseudo layer after the GDN layers; the GDN fold
+        // covers only the GDN layers and the PLE fold commits the pseudo layer.
+        LinearAttentionStateAllLayersView gdn_states = state_images->linear().all_layers_view();
+        gdn_states.spec.layers = static_cast<std::uint32_t>(replay_records->spec.layers);
+        replay_fold.emplace(*replay_records, gdn_states);
     }
     if (replay_records.has_value() != (speculative_backend != SpeculativeBackend::None) ||
         replay_fold.has_value() != replay_records.has_value()) {

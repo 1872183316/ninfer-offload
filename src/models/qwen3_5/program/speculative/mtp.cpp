@@ -55,7 +55,14 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
     for (int i = 1; i < static_cast<int>(state.mtp_proposal_extent); ++i) {
         Tensor previous_token = state.execution.io.mtp->draft_tokens.slice(0, i - 1, 1);
         Tensor next_draft     = state.execution.io.mtp->draft_tokens.slice(0, i, 1);
-        Tensor next_hidden    = state.execution.prefill_hidden.slice(1, i, 1);
+        // Draft hiddens reuse the prefill staging buffer; Qwen4-Exp columns are wide.
+        const std::int32_t width = card.mtp_hidden_width();
+        if (static_cast<std::int64_t>(width) * (i + 1) > state.execution.prefill_hidden.numel()) {
+            throw std::logic_error("MTP bridge draft hidden exceeds the prefill staging buffer");
+        }
+        Tensor next_hidden(static_cast<std::uint16_t*>(state.execution.prefill_hidden.data) +
+                               static_cast<std::int64_t>(width) * i,
+                           DType::BF16, {width, 1});
         const auto visible    = static_cast<std::uint32_t>(position + i + 1);
         const ops::CausalAttentionExecutionEnvelope envelope{visible, visible};
         card.mtp_forward_ar_step(previous_token, state.execution.io.mtp->ar_hidden, ar_position,
@@ -177,12 +184,8 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                 Tensor valid = ar_valid_columns.slice(1, static_cast<std::int32_t>(step), 1)
                                    .view({batch_size});
                 Tensor previous_batch = previous.view({1, batch_size});
-                Tensor hidden_batch   = ar_hidden.view(
-                    {dimension(state.execution.parameters.model.config().text.hidden_size), 1,
-                       batch_size});
-                Tensor next_hidden_batch = next_hidden.view(
-                    {dimension(state.execution.parameters.model.config().text.hidden_size), 1,
-                     batch_size});
+                Tensor hidden_batch      = ar_hidden.view({card.mtp_hidden_width(), 1, batch_size});
+                Tensor next_hidden_batch = next_hidden.view({card.mtp_hidden_width(), 1, batch_size});
                 card.mtp_forward_decode_batch(previous_batch, hidden_batch, position, rope, valid,
                                               mtp_rows, envelopes.ar[step], next_hidden_batch);
                 card.mtp_propose_batch(next_hidden, proposal_logits, next);

@@ -253,10 +253,14 @@ def build_model(
     companions: Mapping[str, SafetensorsSource] | None = None,
     resource_overrides: Mapping[str, str | Path] | None = None,
 ) -> Model:
-    if set(components) != {"text"}:
-        raise ValueError("Qwen4-Exp adapter currently converts the text component only")
+    selected = set(components)
+    if "text" not in selected or selected - {"text", "mtp"}:
+        raise ValueError("Qwen4-Exp adapter converts the text and mtp components")
     config = text_config(base.config)
     records = {"text": {"config": config}}
+    if "mtp" in selected:
+        _check_mtp(base.config, config)
+        records["mtp"] = {"config": {"architectures": ["Qwen4ExpMTP"]}, "target": "text"}
     refs, resources, count, special = load_resources(
         base.root, vocab_size=config["vocab_size"], vision_config=None,
         overrides=resource_overrides,
@@ -268,8 +272,33 @@ def build_model(
     h, r = config["hidden_size"], config["vocab_size"]
     prefix = "model.language_model."
     builder.add("text/token_embedding", base, prefix + "embed_tokens.weight", (r, h))
-    builder.add("text/output_head", base, "lm_head.weight", (r, h), inputs=("text/final_hidden",))
+    head_inputs = ("text/final_hidden",) + (("mtp/final_hidden",) if "mtp" in selected else ())
+    builder.add("text/output_head", base, "lm_head.weight", (r, h), inputs=head_inputs)
     builder.hyper("text/head_hc/", prefix + "hyper_connection_mixer.", base, config, inject=False)
     for i, kind in enumerate(config["layer_types"]):
         builder.block(f"text/layers/{i}/", prefix + f"layers.{i}.", base, config, kind)
+    if "mtp" in selected:
+        # Stem: fc_embedding(norm(embedding of the next token)) + fc_hidden(norm(target wide
+        # stream)) for every stream; then one full-attention block and the head mixer.
+        wide = config["hc_count"] * h
+        builder.add("mtp/embedding_norm", base, "mtp.pre_fc_norm_embedding.weight", (h,))
+        builder.add("mtp/hidden_norm", base, "mtp.pre_fc_norm_hidden.weight", (wide,))
+        builder.add("mtp/fc_embedding", base, "mtp.fc_embedding.weight", (h, h),
+                    inputs=("mtp/embedding_input",))
+        builder.add("mtp/fc_hidden", base, "mtp.fc_hidden.weight", (h, h),
+                    inputs=("mtp/hidden_input",))
+        builder.hyper("mtp/head_hc/", "mtp.hyper_connection_mixer.", base, config, inject=False)
+        builder.block("mtp/layers/0/", "mtp.layers.0.", base, config, "full_attention")
     return model
+
+
+def _check_mtp(source: dict, config: dict) -> None:
+    raw = source.get("text_config", source)
+    _fixed(raw, "mtp_num_hidden_layers", 1, "text")
+    _fixed(raw, "mtp_use_dedicated_embeddings", False, "text")
+    mtp = raw.get("mtp") or {}
+    if mtp.get("layer_types", ["full_attention"]) != ["full_attention"]:
+        raise ValueError("the Qwen4-Exp MTP layer must be full attention")
+    theta = mtp.get("rope_theta", config["rope_parameters"]["rope_theta"])
+    if float(theta) != config["rope_parameters"]["rope_theta"]:
+        raise ValueError("the MTP layer must share the text RoPE theta")

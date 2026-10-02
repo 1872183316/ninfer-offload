@@ -73,7 +73,7 @@ DecoderStateLayout plan_decoder_state(LayoutBuilder& builder, const DecoderState
     if (spec.enable_mtp) {
         layout.mtp_kv = plan_cache(builder, spec.mtp_layers, spec.capacity, spec.kv_heads,
                                    spec.attention_head_dim, spec.kv_storage, spec.kv_table_rows,
-                                   spec.mtp_physical_page_groups, 0);
+                                   spec.mtp_physical_page_groups, spec.index_dim);
     }
     return layout;
 }

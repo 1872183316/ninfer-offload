@@ -2,6 +2,7 @@
 
 #include <array>
 #include <limits>
+#include <vector>
 #include <stdexcept>
 #include <string>
 
@@ -40,6 +41,9 @@ void validate_spec(const GdnReplayRecordSpec& spec) {
     }
     if (spec.value_heads % spec.qk_heads != 0) {
         throw std::invalid_argument("GDN replay value heads must be grouped by Q/K heads");
+    }
+    if (spec.ple_channels < 0) {
+        throw std::invalid_argument("GDN replay PLE channel count must not be negative");
     }
     (void)checked_outer_extent(spec);
 }
@@ -85,8 +89,23 @@ void validate_layout(const GdnReplayRecordLayout& layout) {
     require_region(layout.gate, DType::FP32, {2, layout.spec.value_heads, layout.spec.width, outer},
                    "gate");
 
-    const TensorRegion* regions[] = {&layout.conv, &layout.key, &layout.value, &layout.gate};
-    for (std::size_t i = 0; i < std::size(regions); ++i) {
+    if ((layout.spec.ple_channels > 0) != layout.ple_conv.has_value() ||
+        layout.ple_conv.has_value() != layout.ple_ids.has_value()) {
+        throw std::logic_error("GDN replay PLE record planes do not match the spec");
+    }
+    std::vector<const TensorRegion*> regions{&layout.conv, &layout.key, &layout.value,
+                                             &layout.gate};
+    if (layout.ple_conv) {
+        require_region(*layout.ple_conv, DType::BF16,
+                       {layout.spec.ple_channels, layout.spec.width, layout.spec.record_capacity,
+                        1},
+                       "PLE conv");
+        require_region(*layout.ple_ids, DType::I32,
+                       {layout.spec.width, layout.spec.record_capacity, 1, 1}, "PLE ids");
+        regions.push_back(&*layout.ple_conv);
+        regions.push_back(&*layout.ple_ids);
+    }
+    for (std::size_t i = 0; i < regions.size(); ++i) {
         for (std::size_t j = 0; j < i; ++j) { require_disjoint(*regions[i], *regions[j]); }
     }
 }
@@ -109,17 +128,29 @@ GdnReplayRecordLayout plan_gdn_replay_records(LayoutBuilder& builder,
                            kRecordAlignment, "GDN replay value records");
     layout.gate = builder.add_tensor(DType::FP32, {2, spec.value_heads, spec.width, outer},
                                      kRecordAlignment, "GDN replay gate records");
+    if (spec.ple_channels > 0) {
+        layout.ple_conv =
+            builder.add_tensor(DType::BF16, {spec.ple_channels, spec.width, spec.record_capacity},
+                               kRecordAlignment, "PLE replay conv records");
+        layout.ple_ids = builder.add_tensor(DType::I32, {spec.width, spec.record_capacity},
+                                            kRecordAlignment, "PLE replay id records");
+    }
     return layout;
 }
 
 std::size_t GdnReplayRecordLayout::payload_bytes() const noexcept {
-    return conv.region.bytes + key.region.bytes + value.region.bytes + gate.region.bytes;
+    return conv.region.bytes + key.region.bytes + value.region.bytes + gate.region.bytes +
+           (ple_conv ? ple_conv->region.bytes + ple_ids->region.bytes : 0);
 }
 
 GdnReplayRecords::GdnReplayRecords(DeviceSpan backing, const GdnReplayRecordLayout& layout)
     : conv(layout.conv.bind(backing)), key(layout.key.bind(backing)),
       value(layout.value.bind(backing)), gate(layout.gate.bind(backing)), spec(layout.spec) {
     validate_layout(layout);
+    if (layout.ple_conv) {
+        ple_conv = layout.ple_conv->bind(backing);
+        ple_ids  = layout.ple_ids->bind(backing);
+    }
 }
 
 GdnReplayRecordLayer GdnReplayRecords::layer(std::int32_t layer_index, std::int32_t rows) const {

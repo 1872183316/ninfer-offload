@@ -102,6 +102,10 @@ struct MtpWeights {
     BlockWeights layer;
     WeightId token_embedding, output_head;
     WeightUseId output_head_use;
+    // Qwen4-Exp: per-stream stem projections and the head mixer replace input_projection and
+    // final_norm; hidden_norm then spans the whole wide stream.
+    std::optional<WeightId> fc_embedding, fc_hidden;
+    std::optional<HyperWeights> head_hc;
 };
 
 struct NormWeights {

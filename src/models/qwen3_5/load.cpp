@@ -54,7 +54,7 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
         out->weights.vision = loading::bind_vision(bindings, *out->config.vision, text);
     }
     if (out->config.mtp) {
-        out->weights.mtp = loading::bind_mtp(bindings, text, out->weights.text);
+        out->weights.mtp = loading::bind_mtp(bindings, text, out->weights.text, options);
     }
     if (out->config.draft) {
         out->weights.draft =

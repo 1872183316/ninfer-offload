@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <span>
 
 namespace ninfer::ops {
 
@@ -85,6 +86,8 @@ struct PleHash {
 void ple_ngram_rows(const Tensor& ids, const Tensor& valid, const PleHash& hash,
                     const PleStateView& state, const Tensor& src_slots, const Tensor& dst_slots,
                     Tensor& rows, cudaStream_t stream);
+// Both PLE state Ops accept an empty dst_slots: they then read the source history and write no
+// state (speculative verify), and ple_replay_fold later commits an accepted prefix.
 
 /**
  * Dilated depthwise causal convolution with SiLU: x BF16 [C,W,B], weight BF16 [K,C], slot
@@ -97,5 +100,24 @@ void ple_dilated_conv_silu(const Tensor& x, const Tensor& weight, std::int32_t d
                            const Tensor& valid, const PleStateView& state,
                            const Tensor& src_slots, const Tensor& dst_slots, Tensor& out,
                            cudaStream_t stream);
+
+struct PleReplayFoldRow {
+    std::int32_t source_slot      = 0;
+    std::int32_t destination_slot = 0;
+    std::int32_t commit_columns   = 0;
+};
+
+/**
+ * Commit the first commit_columns verified tokens of row r into its destination PLE state:
+ * convolution history = tail_hist(source history || conv_record[:, 0:commit, r]) and token
+ * history = the last (ngram-1) tokens of (source history, id_record[0:commit, r]), where
+ * hist = (taps-1)*dilation. conv_record BF16 [C,W,R] holds the raw convolution inputs and
+ * id_record I32 [W,R] the token ids recorded during verify. A zero commit is a no-op. The
+ * convolution history is bit-identical to running the state-writing Ops on the accepted prefix;
+ * the token history is equivalent (an absent entry reads as eos in both). rows.size() <= 8.
+ */
+void ple_replay_fold(const Tensor& conv_record, const Tensor& id_record, std::int32_t taps,
+                     std::int32_t dilation, std::int32_t ngram_size, const PleStateView& state,
+                     std::span<const PleReplayFoldRow> rows, cudaStream_t stream);
 
 } // namespace ninfer::ops

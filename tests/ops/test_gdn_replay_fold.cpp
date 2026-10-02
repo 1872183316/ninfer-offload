@@ -772,6 +772,9 @@ int main() {
     failures += run_case({30, 32, 8192}, 6, 1, {6}, 1841U);
     failures += run_case({30, 32, 8192}, 6, 2, {2, 5}, 1851U);
     failures += run_case({30, 32, 8192}, 16, 8, {0, 1, 2, 3, 16, 7, 12, 5}, 1861U);
+    // Qwen4-Exp: 36 GDN layers of the 16K/48V geometry (speculative widths 2..4).
+    failures += run_case({36, 48, 10240}, 3, 1, {2}, 1871U);
+    failures += run_case({36, 48, 10240}, 4, 2, {4, 1}, 1873U);
     failures += run_record_fold_rounds();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_replay_fold\n";
     return failures == 0 ? 0 : 1;

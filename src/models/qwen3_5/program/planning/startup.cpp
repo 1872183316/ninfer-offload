@@ -152,7 +152,10 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                 .slot_count     = state_image_slots,
                 .conv_dtype     = DType::BF16,
             },
-        .hidden = dimension(config.hidden_size),
+        // MTP continuation is conditioned on the Qwen4-Exp wide stream.
+        .hidden = plan.features.mtp() && config.hyper
+                      ? dimension(config.hyper->count) * dimension(config.hidden_size)
+                      : dimension(config.hidden_size),
     };
     {
         const auto* draft =
@@ -179,6 +182,9 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                 .value_heads     = (config.gdn ? dimension(config.gdn->linear_num_value_heads) : 0),
                 .key_dim         = (config.gdn ? dimension(config.gdn->linear_key_head_dim) : 0),
                 .value_dim       = (config.gdn ? dimension(config.gdn->linear_value_head_dim) : 0),
+                .ple_channels    = config.ple ? dimension(config.hyper->count) *
+                                                     dimension(config.hidden_size)
+                                              : 0,
             });
     }
     {
@@ -239,6 +245,10 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
 
     out.round = qwen3_5::begin_round_state_layout(
         builder, qwen3_5::RoundStateSpec{.hidden         = dimension(config.hidden_size),
+                                         .mtp_hidden     = config.hyper
+                                                               ? dimension(config.hyper->count) *
+                                                                     dimension(config.hidden_size)
+                                                               : 0,
                                          .output_rows    = dimension(config.vocab_size),
                                          .batch_capacity = plan.max_concurrency,
                                          .draft_window   = plan.draft_window,
@@ -309,6 +319,119 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         scratch(layout, ops::linear_add_workspace_capacity_bytes(
                             p.weight.qtype, p.weight.n, p.weight.k, p.policy, first, last));
     };
+    // Qwen4-Exp pieces shared by the Text stack and the MTP block, mirroring TextContext
+    // allocation by allocation.
+    const auto qwen4_hyper = [&](WorkspaceLayoutBuilder& layout, const execution::HyperParameters& w,
+                                 bool inject, std::int32_t first, std::int32_t last) {
+        const auto hidden = dimension(config.hidden_size);
+        const auto count  = dimension(config.hyper->count);
+        auto mix          = layout.scope();
+        matrix(layout, DType::BF16, count * hidden, last);
+        matrix(layout, DType::BF16, dimension(config.hyper->low_rank), last);
+        linear_scratch(layout, w.down, first, last);
+        matrix(layout, DType::BF16, count * hidden, last);
+        linear_scratch(layout, w.up, first, last);
+        if (inject) {
+            matrix(layout, DType::BF16, count, last);
+            linear_scratch(layout, *w.inject, first, last);
+        }
+    };
+    // TextContext::qwen4exp_attention after the block input and output are allocated.
+    const auto qwen4_attention = [&](WorkspaceLayoutBuilder& layout,
+                                     const execution::Qwen4AttentionParameters* a,
+                                     std::int32_t first, std::int32_t last,
+                                     std::int32_t batch_size, std::int32_t min_width,
+                                     std::int32_t max_width,
+                                     ops::CausalAttentionExecutionEnvelope envelope) {
+        const auto qw = dimension(config.attention->query_width());
+        const auto kw = dimension(config.attention->key_width());
+        matrix(layout, DType::BF16, qw, last);
+        matrix(layout, DType::BF16, qw, last);
+        matrix(layout, DType::BF16, kw, last);
+        matrix(layout, DType::BF16, kw, last);
+        for (const auto* w : {&a->query, &a->gate, &a->key, &a->value}) {
+            linear_scratch(layout, *w, first, last);
+        }
+        if (config.qsa_active(plan.capacity)) {
+            const auto& ix = *config.indexer;
+            const ops::QsaGeometry geometry{
+                .index_heads = dimension(ix.heads),
+                .index_dim   = dimension(ix.head_dim),
+                .rotary_dim  = dimension(config.rope_parameters->rotary_dim),
+                .compress    = dimension(ix.compress_ratio),
+                .block_topk  = dimension(ix.budget / ix.compress_ratio),
+                .theta       = config.rope_parameters->rope_theta,
+                .eps         = config.rms_norm_eps,
+            };
+            matrix(layout, DType::BF16, dimension((ix.heads + 1) * ix.head_dim), last);
+            linear_scratch(layout, a->index_query_key, first, last);
+            matrix(layout, DType::I32, geometry.block_topk, last);
+            scratch(layout, ops::qsa_select_workspace_bytes(
+                                geometry, envelope.max_visible_keys,
+                                std::max(batch_size, 1), std::max(last, 1)));
+        }
+        (void)workspace::text_attention_results(layout, config, last);
+        if (config.qsa_active(plan.capacity)) {
+            scratch(layout, ops::qsa_attention_workspace_bytes(std::max(last, 1)));
+        }
+        scratch(layout,
+                ops::causal_softmax_attention_workspace_capacity_bytes(
+                    {dimension(config.attention->head_dim),
+                     dimension(config.attention->num_attention_heads),
+                     dimension(config.attention->num_key_value_heads)},
+                    plan.kv_storage, envelope, batch_size, min_width, max_width));
+        linear_scratch(layout, a->output, first, last);
+    };
+    // One attention (or GDN) stage and one MoE stage of a Qwen4-Exp block on the wide stream.
+    const auto qwen4_block = [&](WorkspaceLayoutBuilder& layout,
+                                 const execution::BlockParameters& block, std::int32_t first,
+                                 std::int32_t last, std::int32_t batch_size,
+                                 std::int32_t min_width, std::int32_t max_width,
+                                 ops::CausalAttentionExecutionEnvelope envelope) {
+        const auto hidden = dimension(config.hidden_size);
+        const auto count  = dimension(config.hyper->count);
+        {
+            auto stage = layout.scope();
+            matrix(layout, DType::BF16, hidden, last);
+            matrix(layout, DType::FP32, count, last);
+            qwen4_hyper(layout, *block.attn_hc, true, first, last);
+            matrix(layout, DType::BF16, hidden, last);
+            if (const auto* a = std::get_if<execution::Qwen4AttentionParameters>(&block.mixer)) {
+                qwen4_attention(layout, a, first, last, batch_size, min_width, max_width,
+                                envelope);
+            } else {
+                const auto& g  = std::get<execution::Qwen4GdnParameters>(block.mixer);
+                const auto kw  = dimension(config.gdn->key_width());
+                const auto vw  = dimension(config.gdn->value_width());
+                const auto vh  = dimension(config.gdn->linear_num_value_heads);
+                const auto kh  = dimension(config.gdn->linear_num_key_heads);
+                matrix(layout, DType::BF16, 2 * kw + vw, last);
+                matrix(layout, DType::BF16, vw, last);
+                matrix(layout, DType::BF16, vh, last);
+                matrix(layout, DType::BF16, vh, last);
+                for (const auto* w : {&g.qkv, &g.z, &g.a, &g.b}) {
+                    linear_scratch(layout, *w, first, last);
+                }
+                matrix(layout, DType::FP32, vh, last);
+                matrix(layout, DType::FP32, vh, last);
+                matrix(layout, DType::BF16, kw, last);
+                matrix(layout, DType::BF16, kw, last);
+                matrix(layout, DType::BF16, vw, last);
+                matrix(layout, DType::BF16, vw, last);
+                matrix(layout, DType::BF16, 2 * kw + vw, last);
+                scratch(layout, ops::gated_delta_net_workspace_capacity_bytes(kh, vh, first,
+                                                                              last));
+                matrix(layout, DType::BF16, vw, last);
+                linear_scratch(layout, g.output, first, last);
+            }
+        }
+        auto stage = layout.scope();
+        matrix(layout, DType::BF16, hidden, last);
+        matrix(layout, DType::FP32, count, last);
+        qwen4_hyper(layout, *block.ffn_hc, true, first, last);
+        matrix(layout, DType::BF16, hidden, last);
+        scratch(layout, execution::ffn_workspace_bytes(block.ffn, first, last));
+    };
     // Mirrors TextContext::qwen4exp_layers allocation by allocation.
     const auto qwen4exp_body = [&](WorkspaceLayoutBuilder& layout, std::int32_t first,
                                    std::int32_t last, std::int32_t batch_size,
@@ -316,18 +439,6 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                    ops::CausalAttentionExecutionEnvelope envelope) {
         const auto hidden = dimension(config.hidden_size);
         const auto count  = dimension(config.hyper->count);
-        const auto hyper  = [&](const execution::HyperParameters& w, bool inject) {
-            auto mix = layout.scope();
-            matrix(layout, DType::BF16, count * hidden, last);
-            matrix(layout, DType::BF16, dimension(config.hyper->low_rank), last);
-            linear_scratch(layout, w.down, first, last);
-            matrix(layout, DType::BF16, count * hidden, last);
-            linear_scratch(layout, w.up, first, last);
-            if (inject) {
-                matrix(layout, DType::BF16, count, last);
-                linear_scratch(layout, *w.inject, first, last);
-            }
-        };
         matrix(layout, DType::BF16, count * hidden, last);
         for (const auto& block : parameters.text.layers) {
             if (block.ple) {
@@ -345,86 +456,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 matrix(layout, DType::BF16, count * hidden, last);
                 matrix(layout, DType::BF16, count * hidden, last);
             }
-            {
-                auto stage = layout.scope();
-                matrix(layout, DType::BF16, hidden, last);
-                matrix(layout, DType::FP32, count, last);
-                hyper(*block.attn_hc, true);
-                matrix(layout, DType::BF16, hidden, last);
-                if (const auto* a =
-                        std::get_if<execution::Qwen4AttentionParameters>(&block.mixer)) {
-                    const auto qw = dimension(config.attention->query_width());
-                    const auto kw = dimension(config.attention->key_width());
-                    matrix(layout, DType::BF16, qw, last);
-                    matrix(layout, DType::BF16, qw, last);
-                    matrix(layout, DType::BF16, kw, last);
-                    matrix(layout, DType::BF16, kw, last);
-                    for (const auto* w : {&a->query, &a->gate, &a->key, &a->value}) {
-                        linear_scratch(layout, *w, first, last);
-                    }
-                    if (config.qsa_active(plan.capacity)) {
-                        const auto& ix = *config.indexer;
-                        const ops::QsaGeometry geometry{
-                            .index_heads = dimension(ix.heads),
-                            .index_dim   = dimension(ix.head_dim),
-                            .rotary_dim  = dimension(config.rope_parameters->rotary_dim),
-                            .compress    = dimension(ix.compress_ratio),
-                            .block_topk  = dimension(ix.budget / ix.compress_ratio),
-                            .theta       = config.rope_parameters->rope_theta,
-                            .eps         = config.rms_norm_eps,
-                        };
-                        matrix(layout, DType::BF16, dimension((ix.heads + 1) * ix.head_dim), last);
-                        linear_scratch(layout, a->index_query_key, first, last);
-                        matrix(layout, DType::I32, geometry.block_topk, last);
-                        scratch(layout, ops::qsa_select_workspace_bytes(
-                                            geometry, envelope.max_visible_keys,
-                                            std::max(batch_size, 1), std::max(last, 1)));
-                    }
-                    (void)workspace::text_attention_results(layout, config, last);
-                    if (config.qsa_active(plan.capacity)) {
-                        scratch(layout, ops::qsa_attention_workspace_bytes(std::max(last, 1)));
-                    }
-                    scratch(layout,
-                            ops::causal_softmax_attention_workspace_capacity_bytes(
-                                {dimension(config.attention->head_dim),
-                                 dimension(config.attention->num_attention_heads),
-                                 dimension(config.attention->num_key_value_heads)},
-                                plan.kv_storage, envelope, batch_size, min_width, max_width));
-                    linear_scratch(layout, a->output, first, last);
-                } else {
-                    const auto& g  = std::get<execution::Qwen4GdnParameters>(block.mixer);
-                    const auto kw  = dimension(config.gdn->key_width());
-                    const auto vw  = dimension(config.gdn->value_width());
-                    const auto vh  = dimension(config.gdn->linear_num_value_heads);
-                    const auto kh  = dimension(config.gdn->linear_num_key_heads);
-                    matrix(layout, DType::BF16, 2 * kw + vw, last);
-                    matrix(layout, DType::BF16, vw, last);
-                    matrix(layout, DType::BF16, vh, last);
-                    matrix(layout, DType::BF16, vh, last);
-                    for (const auto* w : {&g.qkv, &g.z, &g.a, &g.b}) {
-                        linear_scratch(layout, *w, first, last);
-                    }
-                    matrix(layout, DType::FP32, vh, last);
-                    matrix(layout, DType::FP32, vh, last);
-                    matrix(layout, DType::BF16, kw, last);
-                    matrix(layout, DType::BF16, kw, last);
-                    matrix(layout, DType::BF16, vw, last);
-                    matrix(layout, DType::BF16, vw, last);
-                    matrix(layout, DType::BF16, 2 * kw + vw, last);
-                    scratch(layout, ops::gated_delta_net_workspace_capacity_bytes(kh, vh, first,
-                                                                                  last));
-                    matrix(layout, DType::BF16, vw, last);
-                    linear_scratch(layout, g.output, first, last);
-                }
-            }
-            auto stage = layout.scope();
-            matrix(layout, DType::BF16, hidden, last);
-            matrix(layout, DType::FP32, count, last);
-            hyper(*block.ffn_hc, true);
-            matrix(layout, DType::BF16, hidden, last);
-            scratch(layout, execution::ffn_workspace_bytes(block.ffn, first, last));
+            qwen4_block(layout, block, first, last, batch_size, min_width, max_width, envelope);
         }
-        hyper(*parameters.text.head_hc, false);
+        qwen4_hyper(layout, *parameters.text.head_hc, false, first, last);
         if (!plan.causal_scoring) {
             linear_scratch(layout, parameters.text.output_head, first, last);
         }
@@ -603,7 +637,81 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         }
     }
 
-    if (plan.features.mtp()) {
+    if (plan.features.mtp() && parameters.qwen4_mtp) {
+        // Qwen4-Exp MTP, mirroring TextContext::qwen4exp_mtp_core and its callers.
+        const auto& m     = *parameters.qwen4_mtp;
+        const auto hidden = dimension(config.hidden_size);
+        const auto count  = dimension(config.hyper->count);
+        const auto wide   = count * hidden;
+        const auto mtp_core = [&](WorkspaceLayoutBuilder& layout, std::int32_t tokens,
+                                  std::int32_t batch, std::int32_t width) {
+            auto core = layout.scope();
+            {
+                auto stem = layout.scope();
+                matrix(layout, DType::BF16, hidden, tokens);
+                matrix(layout, DType::BF16, hidden, tokens);
+                matrix(layout, DType::BF16, wide, tokens);
+                matrix(layout, DType::BF16, hidden, tokens);
+                linear_scratch(layout, m.fc_embedding, tokens, tokens);
+                matrix(layout, DType::BF16, hidden, count * tokens);
+                linear_scratch(layout, m.fc_hidden, count * tokens, count * tokens);
+            }
+            qwen4_block(layout, m.layer, tokens, tokens, batch, width, width, text_envelope);
+        };
+        const auto mtp_proposal = [&](WorkspaceLayoutBuilder& layout, std::int32_t columns) {
+            auto proposal = layout.scope();
+            matrix(layout, DType::BF16, hidden, columns);
+            qwen4_hyper(layout, m.head_hc, false, columns, columns);
+            linear_scratch(layout, m.output_head, columns, columns);
+        };
+
+        WorkspaceLayoutBuilder mtp_prefill;
+        text_common_root(mtp_prefill, chunk);
+        matrix(mtp_prefill, DType::BF16, wide, chunk); // wide capture
+        target_body(mtp_prefill, 1, chunk, qwen3_5::TextPhase::Prefill, GdnWorkspacePath::Prefill,
+                    1, 1, chunk, text_envelope);
+        matrix(mtp_prefill, DType::I32, 1, chunk);
+        {
+            auto call = mtp_prefill.scope();
+            matrix(mtp_prefill, DType::BF16, wide, chunk);
+            mtp_core(mtp_prefill, chunk, 1, chunk);
+            mtp_proposal(mtp_prefill, 1);
+        }
+        for (std::int32_t i = 1; i < drafts; ++i) {
+            matrix(mtp_prefill, DType::BF16, wide, 1);
+            matrix(mtp_prefill, DType::I32, 1, 1);
+            mtp_core(mtp_prefill, 1, 1, 1);
+            mtp_proposal(mtp_prefill, 1);
+        }
+        out.mtp_prefill = finish(mtp_prefill);
+
+        WorkspaceLayoutBuilder mtp_batch;
+        matrix(mtp_batch, DType::I32, 1, verify);
+        mtp_core(mtp_batch, verify, 1, verify);
+        mtp_proposal(mtp_batch, 1);
+        out.mtp_round = finish(mtp_batch);
+        for (std::int32_t batch = 1; batch <= static_cast<std::int32_t>(plan.max_concurrency);
+             ++batch) {
+            const std::int32_t aggregate = batch * verify;
+            WorkspaceLayoutBuilder target;
+            matrix(target, DType::BF16, hidden, aggregate);
+            target_body(target, aggregate, aggregate, qwen3_5::TextPhase::Verify,
+                        GdnWorkspacePath::ReplayRecord, batch, verify, verify, text_envelope);
+            matrix(target, DType::BF16, hidden, aggregate); // mixed hidden for the head
+            WorkspaceLayoutBuilder alignment;
+            mtp_core(alignment, aggregate, batch, verify);
+            WorkspaceLayoutBuilder ar;
+            mtp_core(ar, batch, batch, 1);
+            WorkspaceLayoutBuilder proposal;
+            mtp_proposal(proposal, batch);
+            const std::size_t batch_accept =
+                ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
+                    dimension(parameters.model.resources().public_token_count), drafts, drafts,
+                    batch, batch);
+            out.mtp_round = std::max({out.mtp_round, finish(target), finish(alignment), finish(ar),
+                                      finish(proposal), batch_accept});
+        }
+    } else if (plan.features.mtp()) {
         WorkspaceLayoutBuilder mtp_prefill;
         text_common_root(mtp_prefill, chunk);
         target_body(mtp_prefill, 1, chunk, qwen3_5::TextPhase::Prefill, GdnWorkspacePath::Prefill,
@@ -888,8 +996,9 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
                                             " (QSA) supports text input only");
             }
         }
-        if (parameters.model.options().speculative != SpeculativeBackend::None) {
-            throw std::invalid_argument("Qwen4-Exp does not implement speculative decoding");
+        if (parameters.model.options().speculative != SpeculativeBackend::None &&
+            parameters.model.options().speculative != SpeculativeBackend::Mtp) {
+            throw std::invalid_argument("Qwen4-Exp implements MTP speculative decoding only");
         }
         if (!parameters.model.options().moe_offload.enabled) {
             throw std::invalid_argument("Qwen4-Exp requires --moe-offload (host PLE table)");

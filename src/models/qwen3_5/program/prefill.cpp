@@ -4,6 +4,7 @@
 #include "models/qwen3_5/execution/linear.h"
 #include "core/device.h"
 #include "ninfer/ops/gdn_replay.h"
+#include "ninfer/ops/hyper_connection.h"
 #include "ninfer/ops/sampling.h"
 #include "ninfer/ops/scalar.h"
 #include "ninfer/ops/scatter.h"
@@ -802,6 +803,31 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         timing.resume_submit();
         replay_fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
                              device.stream);
+        if (replay_records->ple_conv.data != nullptr) {
+            const auto& text = parameters.model.config().text;
+            const auto& ple  = *text.ple;
+            const Tensor pool =
+                state_images->linear().layer_view(text.linear_attention_layers).recurrent;
+            const ops::PleStateView ple_state{
+                .base                 = pool.data,
+                .slot_pitch_bytes     = pool.nb[3],
+                .conv_offset_bytes    = 0,
+                .history_offset_bytes = static_cast<std::int64_t>(text.ple_conv_state_bytes()),
+            };
+            std::array<ops::PleReplayFoldRow, kMaximumConcurrency> ple_rows{};
+            for (std::size_t row = 0; row < lanes.size(); ++row) {
+                ple_rows[row] = ops::PleReplayFoldRow{
+                    .source_slot      = fold_rows[row].source_state_slot,
+                    .destination_slot = fold_rows[row].destination_state_slot,
+                    .commit_columns   = fold_rows[row].commit_columns};
+            }
+            ops::ple_replay_fold(replay_records->ple_conv, replay_records->ple_ids,
+                                 static_cast<std::int32_t>(ple.conv_kernel),
+                                 static_cast<std::int32_t>(ple.ngram_size),
+                                 static_cast<std::int32_t>(ple.ngram_size), ple_state,
+                                 std::span<const ops::PleReplayFoldRow>(ple_rows.data(), lanes.size()),
+                                 device.stream);
+        }
 
         // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
         if (speculative_backend == SpeculativeBackend::DFlash2) {

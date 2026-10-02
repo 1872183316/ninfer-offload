@@ -184,7 +184,8 @@ __global__ void ngram_rows_kernel(const std::int32_t* __restrict__ ids,
         }
     }
     // An absent entry reads as eos, so storing (present, eos) for it is equivalent. The history was
-    // fully read above, which makes src == dst safe.
+    // fully read above, which makes src == dst safe. No dst: record mode, state is not written.
+    if (dst == nullptr) return;
     std::int32_t* out = history_words(state, dst[b]);
     for (int k = 0; k < context; ++k) {
         out[2 * k]     = 1;
@@ -227,6 +228,7 @@ __global__ void dilated_conv_silu_kernel(const __nv_bfloat16* __restrict__ x,
         }
         out[(xb + t) * channels + c] = __float2bfloat16_rn(acc * sigmoidf(acc));
     }
+    if (dst == nullptr) return; // record mode: the caller keeps the inputs for a later fold
     const int count     = valid ? valid[b] : width;
     __nv_bfloat16* next = conv(dst[b]);
     for (int j = 0; j < hist; ++j) {
@@ -235,6 +237,58 @@ __global__ void dilated_conv_silu_kernel(const __nv_bfloat16* __restrict__ x,
 }
 
 unsigned blocks(std::int64_t n) { return static_cast<unsigned>((n + kThreads - 1) / kThreads); }
+
+struct PleFoldRows {
+    PleReplayFoldRow row[8];
+};
+
+// grid (ceil(C/kThreads), rows); one thread per channel; channel 0 also folds the token history.
+__global__ void ple_replay_fold_kernel(const __nv_bfloat16* __restrict__ conv_record,
+                                       const std::int32_t* __restrict__ id_record, PleStateView state,
+                                       PleFoldRows rows, int channels, int width, int hist,
+                                       int context) {
+    const int c                = static_cast<int>(blockIdx.x) * kThreads + threadIdx.x;
+    const int r                = static_cast<int>(blockIdx.y);
+    const PleReplayFoldRow row = rows.row[r];
+    const int commit           = row.commit_columns;
+    if (c >= channels || commit <= 0) return;
+    const auto slot = [&](int index) {
+        return static_cast<char*>(state.base) + static_cast<std::int64_t>(index) * state.slot_pitch_bytes;
+    };
+    // tail_hist(source history || records[0:commit]); everything is read before any write.
+    const auto* in = reinterpret_cast<const __nv_bfloat16*>(slot(row.source_slot) + state.conv_offset_bytes);
+    __nv_bfloat16 next[kMaxHistory];
+    for (int j = 0; j < hist; ++j) {
+        const int index = commit + j;
+        next[j] = index < hist ? in[static_cast<std::int64_t>(index) * channels + c]
+                               : conv_record[(static_cast<std::int64_t>(r) * width + index - hist) *
+                                                 channels + c];
+    }
+    auto* out = reinterpret_cast<__nv_bfloat16*>(slot(row.destination_slot) + state.conv_offset_bytes);
+    for (int j = 0; j < hist; ++j) out[static_cast<std::int64_t>(j) * channels + c] = next[j];
+    if (c != 0) return;
+    const auto* words = reinterpret_cast<const std::int32_t*>(slot(row.source_slot) +
+                                                              state.history_offset_bytes);
+    std::int32_t present[4];
+    std::int32_t token[4];
+    for (int k = 0; k < context; ++k) {
+        present[k] = words[2 * k];
+        token[k]   = words[2 * k + 1];
+    }
+    for (int t = 0; t < commit; ++t) {
+        for (int k = context - 1; k > 0; --k) {
+            present[k] = present[k - 1];
+            token[k]   = token[k - 1];
+        }
+        present[0] = 1;
+        token[0]   = id_record[static_cast<std::int64_t>(r) * width + t];
+    }
+    auto* dst = reinterpret_cast<std::int32_t*>(slot(row.destination_slot) + state.history_offset_bytes);
+    for (int k = 0; k < context; ++k) {
+        dst[2 * k]     = present[k];
+        dst[2 * k + 1] = token[k];
+    }
+}
 
 } // namespace
 
@@ -324,7 +378,7 @@ void ple_ngram_rows(const Tensor& ids, const Tensor& valid, const PleHash& hash,
     require(context >= 1 && context <= 4 && hash.heads_per_ngram > 0 &&
                 context * hash.heads_per_ngram <= 32 &&
                 rows.ne[0] == context * hash.heads_per_ngram && rows.ne[1] == width &&
-                src_slots.ne[0] == batch && dst_slots.ne[0] == batch,
+                src_slots.ne[0] == batch && (!dst_slots.data || dst_slots.ne[0] == batch),
             "ple_ngram_rows: invalid geometry");
     ngram_rows_kernel<<<(batch + 63) / 64, 64, 0, stream>>>(
         static_cast<const std::int32_t*>(ids.data),
@@ -345,7 +399,7 @@ void ple_dilated_conv_silu(const Tensor& x, const Tensor& weight, std::int32_t d
     const int taps     = weight.ne[1];
     const int hist     = (taps - 1) * dilation;
     require(weight.ne[0] == channels && hist <= kMaxHistory && out.ne[0] == channels &&
-                src_slots.ne[0] == batch && dst_slots.ne[0] == batch,
+                src_slots.ne[0] == batch && (!dst_slots.data || dst_slots.ne[0] == batch),
             "ple_dilated_conv_silu: invalid geometry");
     dilated_conv_silu_kernel<<<dim3(blocks(channels), batch), kThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const __nv_bfloat16*>(weight.data),
@@ -354,6 +408,32 @@ void ple_dilated_conv_silu(const Tensor& x, const Tensor& weight, std::int32_t d
         static_cast<const std::int32_t*>(dst_slots.data), static_cast<__nv_bfloat16*>(out.data),
         channels, width, taps, dilation, hist);
     check_launch("ple_dilated_conv_silu");
+}
+
+void ple_replay_fold(const Tensor& conv_record, const Tensor& id_record, std::int32_t taps,
+                     std::int32_t dilation, std::int32_t ngram_size, const PleStateView& state,
+                     std::span<const PleReplayFoldRow> rows, cudaStream_t stream) {
+    const int channels = conv_record.ne[0];
+    const int width    = conv_record.ne[1];
+    const int hist     = (taps - 1) * dilation;
+    const int context  = ngram_size - 1;
+    require(conv_record.dtype == DType::BF16 && id_record.dtype == DType::I32 &&
+                id_record.ne[0] == width && id_record.ne[1] == conv_record.ne[2] &&
+                hist > 0 && hist <= kMaxHistory && context >= 1 && context <= 4 &&
+                !rows.empty() && rows.size() <= 8 &&
+                static_cast<std::int64_t>(rows.size()) <= conv_record.ne[2],
+            "ple_replay_fold: invalid geometry");
+    PleFoldRows packed{};
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        require(rows[i].commit_columns >= 0 && rows[i].commit_columns <= width,
+                "ple_replay_fold: commit extent outside the record width");
+        packed.row[i] = rows[i];
+    }
+    ple_replay_fold_kernel<<<dim3(blocks(channels), static_cast<unsigned>(rows.size())), kThreads,
+                             0, stream>>>(static_cast<const __nv_bfloat16*>(conv_record.data),
+                                          static_cast<const std::int32_t*>(id_record.data), state,
+                                          packed, channels, width, hist, context);
+    check_launch("ple_replay_fold");
 }
 
 } // namespace ninfer::ops

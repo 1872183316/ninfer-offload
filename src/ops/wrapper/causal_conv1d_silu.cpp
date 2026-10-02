@@ -378,4 +378,32 @@ void causal_conv1d_silu_snapshot(const Tensor& x, const Tensor& weight, Tensor& 
                                           initial_state_slots, snapshot_base_slots, out, stream);
 }
 
+void causal_conv1d_silu_record(const Tensor& x, const Tensor& weight, const Tensor& conv_states,
+                               const Tensor& valid_columns, const Tensor& initial_state_slots,
+                               Tensor& conv_record, Tensor& out, cudaStream_t stream) {
+    const bool masked = valid_columns.data != nullptr;
+    if (x.dtype != DType::BF16 || weight.dtype != DType::BF16 || conv_states.dtype != DType::BF16 ||
+        conv_record.dtype != DType::BF16 || out.dtype != DType::BF16) {
+        throw std::invalid_argument("causal_conv1d: record operands must be BF16");
+    }
+    if (initial_state_slots.dtype != DType::I32 || (masked && valid_columns.dtype != DType::I32)) {
+        throw std::invalid_argument("causal_conv1d: record selectors must be I32");
+    }
+    const std::int64_t n = numel_allow_zero(x, "x");
+    require_snapshot_x_shape(x);
+    const std::int32_t batch = x.ne[2];
+    require_weight_shape(weight, x.ne[0]);
+    if (conv_states.ne[0] != x.ne[0] || conv_states.ne[1] != 3 || conv_states.ne[2] <= 0 ||
+        !conv_states.is_contiguous()) {
+        throw std::invalid_argument("causal_conv1d: record conv_states must be BF16 [C,3,Slots]");
+    }
+    if (masked) { require_selector_shape(valid_columns, batch, "valid_columns"); }
+    require_selector_shape(initial_state_slots, batch, "initial_state_slots");
+    require_out_shape(x, out);
+    require_out_shape(x, conv_record);
+    if (n == 0) { return; }
+    detail::causal_conv1d_record_launch(x, weight, conv_states, valid_columns, initial_state_slots,
+                                        conv_record, out, stream);
+}
+
 } // namespace ninfer::ops

@@ -59,4 +59,16 @@ void causal_conv1d_silu_snapshot(const Tensor& x, const Tensor& weight, Tensor& 
                                  const Tensor& snapshot_base_slots, Tensor& out,
                                  cudaStream_t stream);
 
+/**
+ * Record form for ReplaySSM. `x`, `out` and `conv_record` are contiguous BF16 [C,W,B];
+ * `conv_states` is the read-only BF16 [C,3,Slots] pool; selectors as in the snapshot form. Row b
+ * evaluates the same recurrence as the snapshot form from initial_state_slots[b] and writes the
+ * identical outputs, but no state is modified: each valid raw input column is copied to
+ * conv_record so that a fold can set the history to tail_3(initial || conv_record[0:commit]).
+ * Invalid-tail outputs are exact BF16 zero and their record columns are unchanged.
+ */
+void causal_conv1d_silu_record(const Tensor& x, const Tensor& weight, const Tensor& conv_states,
+                               const Tensor& valid_columns, const Tensor& initial_state_slots,
+                               Tensor& conv_record, Tensor& out, cudaStream_t stream);
+
 } // namespace ninfer::ops

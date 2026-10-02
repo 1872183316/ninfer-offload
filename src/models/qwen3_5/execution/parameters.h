@@ -105,6 +105,16 @@ struct MtpParameters {
     LinearParameters output_head;
 };
 
+// Qwen4-Exp MTP: stem u_s = fc_embedding(norm(embedding)) + fc_hidden(norm(wide)_s), one
+// full-attention block on the wide stream, and the head mixer before the shared output head.
+struct Qwen4MtpParameters {
+    Tensor embedding_norm, hidden_norm;
+    LinearParameters fc_embedding, fc_hidden;
+    HyperParameters head_hc;
+    BlockParameters layer;
+    LinearParameters output_head;
+};
+
 struct NormParameters {
     Tensor weight, bias;
 };
@@ -173,6 +183,7 @@ public:
     const Model& model;
     TextParameters text;
     std::optional<MtpParameters> mtp;
+    std::optional<Qwen4MtpParameters> qwen4_mtp;
     std::optional<VisionParameters> vision;
     std::optional<DraftParameters> draft;
     std::optional<ProposalParameters> proposal;

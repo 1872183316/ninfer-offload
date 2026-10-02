@@ -693,6 +693,87 @@ int batched_snapshot_case(std::int32_t C, std::int32_t width,
     return failures;
 }
 
+// Record form: snapshot-equal outputs from the initial window, no state write, and the raw valid
+// input columns in conv_record (the invalid tail of the record keeps its previous bytes).
+int batched_record_case(std::int32_t C, std::int32_t width,
+                        const std::vector<std::int32_t>& initial_slots,
+                        const std::vector<std::int32_t>& valid_columns, std::int32_t slots,
+                        std::uint32_t seed) {
+    const std::int32_t batch        = static_cast<std::int32_t>(initial_slots.size());
+    const LogicalInput input        = make_input(C, width * batch, seed);
+    const std::size_t slot_elements = static_cast<std::size_t>(C) * 3U;
+    const std::size_t row_elements  = static_cast<std::size_t>(C) * width;
+
+    std::vector<float> states(slot_elements * static_cast<std::size_t>(slots));
+    for (std::int32_t slot = 0; slot < slots; ++slot) {
+        std::vector<float> one = make_state(C, seed + 10U + static_cast<std::uint32_t>(slot));
+        std::copy(one.begin(), one.end(),
+                  states.begin() + static_cast<std::size_t>(slot) * slot_elements);
+    }
+    const std::vector<std::uint16_t> x_bits      = bf16_bits(input.x);
+    const std::vector<std::uint16_t> weight_bits = bf16_bits(input.weight);
+    const std::vector<std::uint16_t> state_bits  = bf16_bits(states);
+
+    std::vector<double> expected_output(row_elements * static_cast<std::size_t>(batch), 0.0);
+    std::vector<std::uint16_t> expected_record(x_bits.size(), 0x7fc1U);
+    for (std::int32_t row = 0; row < batch; ++row) {
+        const std::int32_t valid      = valid_columns[static_cast<std::size_t>(row)];
+        const std::size_t input_begin = static_cast<std::size_t>(row) * row_elements;
+        std::vector<float> row_input(input.x.begin() + input_begin,
+                                     input.x.begin() + input_begin +
+                                         static_cast<std::size_t>(valid) * C);
+        const std::size_t initial_begin =
+            static_cast<std::size_t>(initial_slots[static_cast<std::size_t>(row)]) * slot_elements;
+        std::vector<float> initial_state(states.begin() + initial_begin,
+                                         states.begin() + initial_begin + slot_elements);
+        const OracleResult oracle =
+            causal_conv_oracle(row_input, input.weight, initial_state, C, valid, false);
+        std::copy(oracle.output.begin(), oracle.output.end(),
+                  expected_output.begin() + input_begin);
+        std::copy(x_bits.begin() + input_begin,
+                  x_bits.begin() + input_begin + static_cast<std::size_t>(valid) * C,
+                  expected_record.begin() + input_begin);
+    }
+
+    GuardedDeviceBuffer x(x_bits.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer weight(weight_bits.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer state(state_bits.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer initial(initial_slots.size() * sizeof(std::int32_t));
+    GuardedDeviceBuffer valid(valid_columns.size() * sizeof(std::int32_t));
+    GuardedDeviceBuffer record(x_bits.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer output(x_bits.size() * sizeof(std::uint16_t));
+    const std::vector<std::uint16_t> record_poison(x_bits.size(), 0x7fc1U);
+    x.copy_from_host(x_bits.data(), x.bytes());
+    weight.copy_from_host(weight_bits.data(), weight.bytes());
+    state.copy_from_host(state_bits.data(), state.bytes());
+    initial.copy_from_host(initial_slots.data(), initial.bytes());
+    valid.copy_from_host(valid_columns.data(), valid.bytes());
+    record.copy_from_host(record_poison.data(), record.bytes());
+    output.fill(kOutputPoison);
+
+    Tensor tx(x.data(), DType::BF16, {C, width, batch});
+    Tensor tw(weight.data(), DType::BF16, {C, 4});
+    Tensor tstate(state.data(), DType::BF16, {C, 3, slots});
+    Tensor tvalid(valid.data(), DType::I32, {batch});
+    Tensor tinitial(initial.data(), DType::I32, {batch});
+    Tensor trecord(record.data(), DType::BF16, {C, width, batch});
+    Tensor tout(output.data(), DType::BF16, {C, width, batch});
+    ops::causal_conv1d_silu_record(tx, tw, tstate, tvalid, tinitial, trecord, tout, nullptr);
+    cuda_synchronize();
+
+    const std::string tag = "causal_conv1d_silu record C=" + std::to_string(C) +
+                            " W=" + std::to_string(width) + " B=" + std::to_string(batch);
+    int failures = 0;
+    failures += verify_output(tag + " output", from_device_bf16(output.data(), x_bits.size()),
+                              expected_output);
+    failures += verify_bits(tag + " state unchanged", state.data(), state_bits);
+    failures += verify_bits(tag + " record", record.data(), expected_record);
+    failures += verify_buffer_guards(tag + " states", state);
+    failures += verify_buffer_guards(tag + " record", record);
+    failures += verify_buffer_guards(tag + " output", output);
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -741,6 +822,9 @@ int main() {
     // Row 0 reads slot 15 and overwrites it only after the final valid column. This is the
     // production same-row alias pattern; row 1 remains fully disjoint.
     failures += batched_snapshot_case(kQwen35Channels, 16, {15, 33}, {0, 16}, {16, 7}, 34, 5016U);
+    // ReplaySSM record form at the Qwen4-Exp GDN width.
+    failures += batched_record_case(10240, 3, {4, 1}, {3, 2}, 6, 5101U);
+    failures += batched_record_case(10240, 6, {0, 2, 5}, {6, 1, 4}, 6, 5102U);
 
     // The split entry: both channel geometries, across the column counts that select each of its
     // two routes and the boundary between them.

@@ -251,6 +251,36 @@ void launch_batched_smallt_snapshot(const Tensor& x, const Tensor& weight, Tenso
         static_cast<__nv_bfloat16*>(out.data), C, width, slot_stride);
 }
 
+void causal_conv1d_record_launch(const Tensor& x, const Tensor& weight, const Tensor& conv_states,
+                                 const Tensor& valid_columns, const Tensor& initial_state_slots,
+                                 Tensor& conv_record, Tensor& out, cudaStream_t stream) {
+    const std::int32_t C = x.ne[0];
+    const std::int32_t T = x.ne[1];
+    const std::int32_t B = x.ne[2];
+    const std::int64_t slot_stride =
+        static_cast<std::int64_t>(conv_states.ne[0]) * static_cast<std::int64_t>(conv_states.ne[1]);
+    constexpr int kBlock = 128;
+    const dim3 grid(grid_for(C, kBlock, "batched record"), static_cast<unsigned int>(B));
+    const auto* states = static_cast<const __nv_bfloat16*>(conv_states.data);
+    if (valid_columns.data == nullptr) {
+        causal_conv1d_batched_sequence_record_kernel<false><<<grid, kBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __nv_bfloat16*>(weight.data), states, nullptr,
+            static_cast<const std::int32_t*>(initial_state_slots.data),
+            static_cast<__nv_bfloat16*>(conv_record.data), static_cast<__nv_bfloat16*>(out.data),
+            C, T, slot_stride);
+    } else {
+        causal_conv1d_batched_sequence_record_kernel<true><<<grid, kBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __nv_bfloat16*>(weight.data), states,
+            static_cast<const std::int32_t*>(valid_columns.data),
+            static_cast<const std::int32_t*>(initial_state_slots.data),
+            static_cast<__nv_bfloat16*>(conv_record.data), static_cast<__nv_bfloat16*>(out.data),
+            C, T, slot_stride);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void causal_conv1d_snapshot_launch(const Tensor& x, const Tensor& weight, Tensor& conv_states,
                                    const Tensor& valid_columns, const Tensor& initial_state_slots,
                                    const Tensor& snapshot_base_slots, Tensor& out,

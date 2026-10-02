@@ -5,9 +5,11 @@
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/ffn.h"
+#include "models/qwen3_5/execution/scoped_value.h"
 
 #include "core/nvtx.h"
 #include "ninfer/ops/causal_conv1d_silu.h"
+#include "ninfer/ops/embedding.h"
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/gated_rmsnorm.h"
 #include "ninfer/ops/gdn_gating.h"
@@ -15,6 +17,7 @@
 #include "ninfer/ops/hyper_connection.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/residual_add.h"
+#include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/scalar.h"
 
 #include <cuda_runtime.h>
@@ -152,28 +155,55 @@ void TextContext::qwen4exp_gdn(const Qwen4GdnParameters& p, const Tensor& h, Ten
         if (active_sequence_batch_ == 0 || active_linear_state_source_slots_ == nullptr) {
             throw std::logic_error("Verify GDN requires an explicit sequence batch and state slots");
         }
-        if (gdn_state_action_ != GdnStateAction::UpdateInPlace ||
-            active_linear_state_destination_slots_ == nullptr || active_sequence_width_ != 1) {
-            throw std::logic_error("Qwen4-Exp GDN implements width-one in-place decode only");
-        }
         const std::int32_t batch = active_sequence_batch_;
+        const std::int32_t width = active_sequence_width_;
         Tensor conv_states       = state_.layer_view(layer).conv;
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
-        Tensor mixed       = work_.alloc(DType::BF16, {2 * kw + vw, 1, batch});
-        ops::causal_conv1d_silu_snapshot(qkv.view({2 * kw + vw, 1, batch}), p.convolution,
-                                         conv_states, valid, *active_linear_state_source_slots_,
-                                         *active_linear_state_destination_slots_, mixed, s);
-        Tensor mixed_flat = mixed.view({2 * kw + vw, T});
-        copy_rows(mixed_flat, 0, qc, s);
-        copy_rows(mixed_flat, kw, kc, s);
-        copy_rows(mixed_flat, 2 * kw, vc, s);
-        Tensor states = state_.layer_view(layer).recurrent;
-        Tensor ob     = o.view({vd, vheads, 1, batch});
-        ops::gated_delta_net_batch_update(
-            qc.view({kd, kheads, 1, batch}), kc.view({kd, kheads, 1, batch}),
-            vc.view({vd, vheads, 1, batch}), decay.view({vheads, 1, batch}),
-            beta.view({vheads, 1, batch}), scale, /*normalize_qk=*/true, states,
-            *active_linear_state_source_slots_, *active_linear_state_destination_slots_, ob, s);
+        if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
+            // Speculative verify: evaluate from the source state without writing it and record
+            // the transitions; the commit fold replays the accepted prefix.
+            if (replay_records_ == nullptr || width * batch != T) {
+                throw std::logic_error("Qwen4-Exp replay-record GDN binding is incomplete");
+            }
+            GdnReplayRecordLayer records = replay_records_->layer(gidx, batch);
+            Tensor mixed = work_.alloc(DType::BF16, {2 * kw + vw, width, batch});
+            ops::causal_conv1d_silu_record(qkv.view({2 * kw + vw, width, batch}), p.convolution,
+                                           conv_states, valid, *active_linear_state_source_slots_,
+                                           records.conv, mixed, s);
+            Tensor mixed_flat = mixed.view({2 * kw + vw, T});
+            copy_rows(mixed_flat, 0, qc, s);
+            copy_rows(mixed_flat, kw, kc, s);
+            copy_rows(mixed_flat, 2 * kw, vc, s);
+            Tensor ob = o.view({vd, vheads, width, batch});
+            ops::gated_delta_net_replay_record(
+                qc.view({kd, kheads, width, batch}), kc.view({kd, kheads, width, batch}),
+                vc.view({vd, vheads, width, batch}), decay.view({vheads, width, batch}),
+                beta.view({vheads, width, batch}), scale, state_.layer_view(layer).recurrent,
+                valid, *active_linear_state_source_slots_, records.key, records.value,
+                records.gate, ob, s);
+        } else {
+            if (gdn_state_action_ != GdnStateAction::UpdateInPlace ||
+                active_linear_state_destination_slots_ == nullptr || width != 1) {
+                throw std::logic_error("Qwen4-Exp GDN decode updates width-one rows in place");
+            }
+            Tensor mixed = work_.alloc(DType::BF16, {2 * kw + vw, 1, batch});
+            ops::causal_conv1d_silu_snapshot(qkv.view({2 * kw + vw, 1, batch}), p.convolution,
+                                             conv_states, valid,
+                                             *active_linear_state_source_slots_,
+                                             *active_linear_state_destination_slots_, mixed, s);
+            Tensor mixed_flat = mixed.view({2 * kw + vw, T});
+            copy_rows(mixed_flat, 0, qc, s);
+            copy_rows(mixed_flat, kw, kc, s);
+            copy_rows(mixed_flat, 2 * kw, vc, s);
+            Tensor states = state_.layer_view(layer).recurrent;
+            Tensor ob     = o.view({vd, vheads, 1, batch});
+            ops::gated_delta_net_batch_update(
+                qc.view({kd, kheads, 1, batch}), kc.view({kd, kheads, 1, batch}),
+                vc.view({vd, vheads, 1, batch}), decay.view({vheads, 1, batch}),
+                beta.view({vheads, 1, batch}), scale, /*normalize_qk=*/true, states,
+                *active_linear_state_source_slots_, *active_linear_state_destination_slots_, ob,
+                s);
+        }
     } else {
         Tensor conv_in  = state_.conv_slot(layer, linear_state_source_slot_);
         Tensor conv_out = state_.conv_slot(layer, linear_state_destination_slot_);
@@ -218,17 +248,28 @@ void TextContext::qwen4exp_ple(const PleParameters& p, Tensor& wide, Phase ph) {
     std::int32_t batch = 1;
     Tensor valid;
     Tensor source, destination;
+    const bool record = ph == Phase::Verify && gdn_state_action_ == GdnStateAction::RecordForReplay;
     if (ph == Phase::Verify) {
-        if (active_linear_state_source_slots_ == nullptr ||
-            active_linear_state_destination_slots_ == nullptr ||
-            gdn_state_action_ != GdnStateAction::UpdateInPlace) {
-            throw std::logic_error("Qwen4-Exp PLE implements in-place decode only");
+        if (active_linear_state_source_slots_ == nullptr) {
+            throw std::logic_error("Qwen4-Exp PLE verify requires source state slots");
         }
-        width       = active_sequence_width_;
-        batch       = active_sequence_batch_;
-        valid       = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
-        source      = *active_linear_state_source_slots_;
-        destination = *active_linear_state_destination_slots_;
+        width  = active_sequence_width_;
+        batch  = active_sequence_batch_;
+        valid  = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
+        source = *active_linear_state_source_slots_;
+        if (record) {
+            // Speculative verify reads the source state only; an empty destination makes the
+            // state Ops write nothing, and the commit folds the accepted prefix.
+            if (replay_records_ == nullptr || replay_records_->ple_conv.data == nullptr) {
+                throw std::logic_error("Qwen4-Exp PLE verify has no replay records");
+            }
+        } else {
+            if (active_linear_state_destination_slots_ == nullptr ||
+                gdn_state_action_ != GdnStateAction::UpdateInPlace) {
+                throw std::logic_error("Qwen4-Exp PLE decode updates rows in place");
+            }
+            destination = *active_linear_state_destination_slots_;
+        }
     } else {
         source      = work_.alloc(DType::I32, {1});
         destination = work_.alloc(DType::I32, {1});
@@ -266,6 +307,14 @@ void TextContext::qwen4exp_ple(const PleParameters& p, Tensor& wide, Phase ph) {
     ops::ple_gate(key_n, query_n, value, count, gated, s);
     Tensor gated_n = key_n; // key_n is dead; reuse its storage
     ops::hc_grouped_rmsnorm(gated, p.norm_conv, hidden, config_.rms_norm_eps, gated_n, s);
+    if (record) {
+        // Raw convolution inputs and token ids of every column, row-major [.., width, batch].
+        CUDA_CHECK(cudaMemcpyAsync(replay_records_->ple_conv.data, gated_n.data, gated_n.bytes(),
+                                   cudaMemcpyDeviceToDevice, s));
+        CUDA_CHECK(cudaMemcpyAsync(replay_records_->ple_ids.data, active_ids_->data,
+                                   static_cast<std::size_t>(T) * sizeof(std::int32_t),
+                                   cudaMemcpyDeviceToDevice, s));
+    }
     Tensor conv = query_n; // query_n is dead as well
     ops::ple_dilated_conv_silu(gated_n.view({count * hidden, width, batch}), p.convolution,
                                static_cast<std::int32_t>(ple.ngram_size), valid, state, source,
@@ -325,7 +374,90 @@ void TextContext::qwen4exp_layers(Tensor& x, Phase ph) {
                                      " columns=" + std::to_string(T) + ": " + error.what());
         }
     }
+    if (wide_capture_ != nullptr) {
+        if (wide_capture_->dtype != DType::BF16 || wide_capture_->ne[0] != count * hidden ||
+            wide_capture_->ne[1] != T || !wide_capture_->is_contiguous()) {
+            throw std::logic_error("Qwen4-Exp wide capture must be BF16 [hc*H,T]");
+        }
+        CUDA_CHECK(cudaMemcpyAsync(wide_capture_->data, wide.data, wide.bytes(),
+                                   cudaMemcpyDeviceToDevice, s));
+    }
     hyper_mix(*parameters_.text.head_hc, wide, x, nullptr);
+}
+
+void TextContext::qwen4exp_mtp_core(const Tensor& ids, const Tensor& hidden,
+                                    const Tensor& positions, const Tensor& rope_positions,
+                                    ops::CausalAttentionExecutionEnvelope envelope,
+                                    Tensor& mtp_hidden, const Tensor* input_embeddings,
+                                    int output_columns) {
+    cudaStream_t s    = ctx_.stream;
+    const auto& m     = *parameters_.qwen4_mtp;
+    const int T       = static_cast<int>(ids.numel());
+    if (output_columns < 0 || output_columns > T) {
+        throw std::invalid_argument("Qwen4-Exp MTP output columns must be in [0,T]");
+    }
+    const auto count  = static_cast<std::int32_t>(config_.hyper->count);
+    const auto H      = dimension(config_.hidden_size);
+    const auto wide   = count * H;
+    Tensor flat_ids   = ids.view({T});
+    Tensor stream_in  = hidden.view({wide, T});
+    Tensor u          = mtp_hidden.view({wide, T});
+
+    // Stem: u_s = fc_embedding(norm(embedding)) + fc_hidden(norm(wide)_s), one BF16 rounding.
+    {
+        auto scope = work_.scope();
+        Tensor emb;
+        if (input_embeddings != nullptr) {
+            emb = input_embeddings->view({H, T});
+        } else {
+            emb = work_.alloc(DType::BF16, {H, T});
+            ops::embedding(flat_ids, *embed_, emb, s);
+        }
+        Tensor e = work_.alloc(DType::BF16, {H, T});
+        ops::rmsnorm(emb, m.embedding_norm, config_.rms_norm_eps, true, e, s);
+        Tensor hn = work_.alloc(DType::BF16, {wide, T});
+        ops::rmsnorm(stream_in, m.hidden_norm, config_.rms_norm_eps, true, hn, s);
+        Tensor fe = work_.alloc(DType::BF16, {H, T});
+        project(e, m.fc_embedding, fe, work_, s);
+        Tensor fh = work_.alloc(DType::BF16, {H, count * T});
+        project(hn.view({H, count * T}), m.fc_hidden, fh, work_, s);
+        ops::hc_expand(fe, count, u, s);
+        ops::residual_add(fh.view({wide, T}), u, s);
+    }
+
+    // One full-attention block: attention against the MTP KV cache, routed experts on the host.
+    const Tensor& rows = active_backend_kv_table_rows_ != nullptr ? *active_backend_kv_table_rows_
+                                                                  : io_.backend_kv_table_row;
+    ScopedValue<const Tensor*> cache_binding(active_cache_positions_, &positions);
+    ScopedValue<const Tensor*> rope_binding(active_rope_positions_, &rope_positions);
+    ScopedValue<const ops::CausalAttentionExecutionEnvelope*> envelope_binding(
+        active_causal_attention_envelope_, &envelope);
+    ScopedValue<const qwen3_5::PagedKVCache*> cache(batch_text_kv_, batch_mtp_kv_);
+    ScopedValue<const Tensor*> table_rows(active_kv_table_rows_, &rows);
+    const auto& block = m.layer;
+    {
+        auto scope     = work_.scope();
+        Tensor input   = work_.alloc(DType::BF16, {H, T});
+        Tensor weights = work_.alloc(DType::FP32, {count, T});
+        hyper_mix(*block.attn_hc, u, input, &weights);
+        Tensor y = work_.alloc(DType::BF16, {H, T});
+        qwen4exp_attention(std::get<Qwen4AttentionParameters>(block.mixer), input, y, 0);
+        ops::hc_combine(u, y, weights, s);
+    }
+    // The MoE is per column, and earlier columns contribute to later ones only through the K/V
+    // appended above, so columns without an output skip it.
+    if (output_columns == 0) { return; }
+    {
+        auto scope     = work_.scope();
+        const int N    = output_columns;
+        Tensor tail    = u.slice(1, T - N, N);
+        Tensor input   = work_.alloc(DType::BF16, {H, N});
+        Tensor weights = work_.alloc(DType::FP32, {count, N});
+        hyper_mix(*block.ffn_hc, tail, input, &weights);
+        Tensor y = zeroed(work_, H, N, s);
+        ffn(input, block.ffn, y, {}, work_, s, false, host_moe_);
+        ops::hc_combine(tail, y, weights, s);
+    }
 }
 
 } // namespace ninfer::models::qwen3_5::execution

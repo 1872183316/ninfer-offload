@@ -191,6 +191,13 @@ public:
         return {weight.qdata, static_cast<std::size_t>(row_bytes * weight.n)};
     }
 
+    Qwen4MtpParameters qwen4_mtp(const MtpWeights& w) const {
+        return Qwen4MtpParameters{tensor(w.embedding_norm), tensor(w.hidden_norm),
+                                  linear(*w.fc_embedding),  linear(*w.fc_hidden),
+                                  hyper(*w.head_hc),        qwen4exp_block(w.layer),
+                                  linear(w.output_head_use)};
+    }
+
     MtpParameters mtp(const MtpWeights& w) const {
         const auto& a = std::get<AttentionWeights>(w.layer.mixer);
         const std::array inputs{model_.input(a.query), model_.input(a.key), model_.input(a.gate),
@@ -346,7 +353,12 @@ Parameters::Parameters(const Model& source) : model(source) {
             hybrid->layer = offloaded++;
         }
     }
-    if (w.mtp) {
+    if (w.mtp && w.mtp->head_hc) {
+        qwen4_mtp = with_context("mtp", [&] { return prepare.qwen4_mtp(*w.mtp); });
+        if (auto* hybrid = std::get_if<ops::HybridSparseMoeWeights>(&qwen4_mtp->layer.ffn)) {
+            hybrid->layer = offloaded++;
+        }
+    } else if (w.mtp) {
         mtp = with_context("mtp", [&] { return prepare.mtp(*w.mtp); });
     }
     if (w.vision) {

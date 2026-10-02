@@ -180,8 +180,7 @@ TextConfig qwen4exp_text(const Json& value) {
 
 TextConfig text(const Json& value, bool mtp) {
     if (value.contains("model_type") && value.at("model_type") == "qwen4_exp_text") {
-        if (mtp) { throw ArtifactError("Qwen4-Exp MTP is not implemented"); }
-        return qwen4exp_text(value);
+        return qwen4exp_text(value); // the MTP layer reuses Text geometry
     }
     require_members(
         value,
@@ -407,9 +406,11 @@ Config parse_config(const artifact::Directory& directory, const LoadOptions& opt
         if (out.mtp) {
             const auto& config = companion(directory, "mtp").config;
             require_members(config, {"architectures"}, {}, "MTP config");
-            if (architecture(config) != (out.text.architecture == Architecture::Qwen3_5Moe
-                                             ? "Qwen3_5MoeMTP"
-                                             : "Qwen3_5MTP")) {
+            const char* expected = out.text.architecture == Architecture::Qwen4Exp ? "Qwen4ExpMTP"
+                                   : out.text.architecture == Architecture::Qwen3_5Moe
+                                       ? "Qwen3_5MoeMTP"
+                                       : "Qwen3_5MTP";
+            if (architecture(config) != expected) {
                 throw ArtifactError("MTP architecture differs from target mathematics");
             }
         }

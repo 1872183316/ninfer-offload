@@ -68,6 +68,8 @@ class VisionPrefillSession;
 
 class TextContext {
 public:
+    // Width of the hidden that conditions MTP: H, or the Qwen4-Exp wide stream hc*H.
+    [[nodiscard]] std::int32_t mtp_hidden_width() const;
     TextContext(DeviceContext& ctx, const execution::Parameters& weights, WorkspaceArena& work,
                 qwen3_5::PagedKVCacheView kv, LinearAttentionStatePool& state,
                 qwen3_5::RoundState& io, Tensor& prefill_hidden, std::uint32_t prefill_chunk,
@@ -183,6 +185,15 @@ private:
     void qwen4exp_gdn(const Qwen4GdnParameters& weights, const Tensor& h, Tensor& y, int index,
                       Phase phase);
     void qwen4exp_ple(const PleParameters& weights, Tensor& wide, Phase phase);
+    // Qwen4-Exp MTP: stem, one block against the MTP KV cache and the host MoE, into the wide
+    // output stream [hc*H,T]; hidden is the target's wide stream before head_hc. Attention runs
+    // over all T columns (appending their MTP K/V and index keys); the MoE stage runs only over
+    // the last output_columns columns, so only those columns of mtp_hidden are complete.
+    void qwen4exp_mtp_core(const Tensor& ids, const Tensor& hidden, const Tensor& positions,
+                           const Tensor& rope_positions,
+                           ops::CausalAttentionExecutionEnvelope envelope, Tensor& mtp_hidden,
+                           const Tensor* input_embeddings, int output_columns);
+
     // Final hidden of the Text stack: RMSNorm for Qwen3.5, the mixed head stream for Qwen4-Exp.
     void final_hidden(const Tensor& x, Tensor& out);
     void gdn_mix(const BlockParameters& weights, Tensor& x, int index, Phase phase);
@@ -276,6 +287,8 @@ private:
     int proposal_head_n_                        = 0;
     const ops::SamplingConfig* sampling_config_ = nullptr;
     const MtpParameters* mtp_                   = nullptr;
+    // Set while a Qwen4-Exp Text forward must also publish its final wide stream [hc*H,T].
+    Tensor* wide_capture_                       = nullptr;
 };
 
 } // namespace ninfer::models::qwen3_5::execution
