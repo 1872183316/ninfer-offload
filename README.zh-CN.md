@@ -28,8 +28,9 @@ x8）、Ubuntu、CUDA 12.8。贪心解码、BF16 KV、4 个提示词各跑 2 遍
 | 模型（路由专家精度） | 每层放到 GPU 的专家数 | 解码 tok/s |
 |---|---|---|
 | Qwen3.8-Flash-Next，专家 4.58 bit/权重，模型文件 108 GB | 0（显存 5.2 GB） | 10.0～10.2 |
-| | 64 | 12.5～14.1 |
-| | 64，MTP 1 个草稿（`ninfer-serve`） | 14.7～16.6 |
+| | 64，固定放置（`--moe-static-experts`，`ninfer-serve`） | 13.6～15.3 |
+| | 64，专家缓存（`ninfer-serve`） | 19.2～24.1 |
+| | 64，专家缓存 + MTP 1 个草稿（`ninfer-serve`） | 21.7～25.5 |
 | Qwen3.6-35B-A3B（groupwise-int） | 128 | 47.5～59.3 |
 | | 176 | 60.6～68.7 |
 
@@ -103,6 +104,11 @@ python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out q
 的解码快了 3%～22%（改代码从 12.6 提到 15.2 tok/s）；2 或 3 个草稿在代码上能快 32%/39%，但写散文会变慢
 （作文 -5%/-21%）。模型文件带 MTP 时 `ninfer-run` 默认开启 1 个草稿（`--no-mtp` 关闭，`--draft-tokens N`
 调整）。ModelScope 上已发布的转换包含 MTP 预测层。
+
+**专家缓存。** `--moe-gpu-experts` 的显存槽位会跟随最近的路由：路由反复选中的专家会在后台复制进 GPU
+槽位，替换最少用的专家（在测试提示上解码比固定放置快 34%～57%；再开 1 个 MTP 草稿，是 v0.3.0 不开 MTP 时的 1.6～1.8 倍）。
+路由和数学都不变，但哪个专家由 GPU 还是 CPU 计算取决于时序，所以 greedy 输出在多次运行之间可能不同；
+`--moe-static-experts` 保持启动时的固定放置。细节和精度验证见卸载文档。
 
 兼容 OpenAI / Anthropic 接口的服务端也支持同样的卸载参数（需 v0.2.0 或更新）：
 

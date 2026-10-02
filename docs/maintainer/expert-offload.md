@@ -1,42 +1,119 @@
 # Routed-expert offload
 
 This fork runs MoE models whose routed experts exceed device memory. Routed expert banks stay in
-host memory and are computed by host threads; a configurable subset of experts per layer also gets a
-device replica. Everything else (embedding, attention/GDN, router, shared expert, head, KV, state)
-remains device resident. Offload is a startup choice (`--moe-offload`, accepted by `ninfer`,
-`ninfer-perplexity` and `ninfer-serve`); without it the native device-resident path is unchanged.
+host memory and are computed by host threads; a configurable number of device slots per layer holds
+copies of selected experts, computed by the GPU. Everything else (embedding, attention/GDN, router,
+shared expert, head, KV, state) remains device resident. Offload is a startup choice
+(`--moe-offload`, accepted by `ninfer`, `ninfer-perplexity` and `ninfer-serve`); without it the
+native device-resident path is unchanged.
 
 ## Placement and binding
 
-- `MoeOffloadOptions` (`include/ninfer/types.h`) selects offload, the number of device-resident
-  experts per layer, host threads, and an optional routing-statistics file.
+- `MoeOffloadOptions` (`include/ninfer/types.h`) selects offload, the number of device slots per
+  layer (`--moe-gpu-experts`), host threads, an optional routing-statistics file and whether the
+  slots follow routing (`dynamic_residency`, default; `--moe-static-experts` keeps the startup
+  choice).
 - `bind_moe` (`src/models/qwen3_5/load/text.cpp`) binds every Text-layer routed expert with
-  `Residency::Host`. MTP keeps its experts on the device.
-- Resident experts are ranked per layer by the statistics file (one line of per-expert routing
-  counts per Text layer) or, without it, by lowest id. Their rows are requested from the host bank
-  with `Binder::require_device_rows`; the materializer concatenates the selected row spans of each
-  row-split plane into a standalone payload (storage-layouts section 3.7) and uploads it. The copy
-  moves stored bytes only; codes and scales are unchanged.
-- Replica slot `s` holds expert `resident[s]`: gate/up rows `[s*2I, (s+1)*2I)`, down rows
-  `[s*H, (s+1)*H)`.
+  `Residency::Host`; the materializer page-locks those host objects (`HostPageLock`) so device
+  copies from them are asynchronous DMA. The Qwen4-Exp MTP layer binds its experts the same way
+  with no slots.
+- The startup residents are ranked per layer by the statistics file (one line of per-expert
+  routing counts per Text layer) or, without it, by lowest id; the Model data records only this
+  list (`HybridSparseMoeWeights::resident`).
+- The slots are Program-owned mutable state: the persistent layout reserves one row-split bank
+  pair per offloaded layer (`ops::hybrid_moe_slot_bytes`), and `HybridMoeHostRuntime::add_layer`
+  copies the startup residents into them. Slot `s` holds the stored rows of one expert: gate/up
+  rows `[s*2I, (s+1)*2I)` and down rows `[s*H, (s+1)*H)`. Copies move stored bytes only; codes and
+  scales are unchanged (storage-layouts section 3.7).
 
 ## Execution
 
 `ops::hybrid_sparse_moe` (`src/ops/sparse_moe/hybrid/`) replaces `sparse_moe` for offloaded layers:
 
-1. GPU: router logits, exact top-K (lower id wins ties), normalized weights, sigmoid shared gate;
-   selections and the BF16 input are written to a mapped host mailbox.
+1. GPU: router logits (`router_logits_kernel`, one warp per router row over all SMs; its first
+   block also copies the BF16 input to the mapped host mailbox), then per token exact top-K
+   (lower id wins ties), normalized weights and the sigmoid shared gate (`route_kernel`). Each
+   selection reads the layer's slot map once (mapped host memory, `int16[E]`); that value alone
+   decides the side. Selections, with slot-held ones written as `-1 - id`, go to the mailbox.
+   An earlier single-kernel route computed the 513 router rows in one block per token and took
+   93-194 us per decode call on the development GPU; the split takes about 20 us.
 2. `cuStreamWriteValue32` publishes the request; the Program-owned `HybridMoeHostRuntime` service
-   thread computes the host-only selected experts with AVX2 row-split kernels
+   thread computes the non-negative selections with AVX2 row-split kernels
    (`src/ops/sparse_moe/host/`) and writes an FP32 partial.
-3. Meanwhile the GPU computes the shared expert and the selected resident experts.
+3. Meanwhile the GPU computes the shared expert and the slot-held selections.
 4. `cuStreamWaitValue32` waits for the host; a combine kernel adds both FP32 partials to the
    residual with one BF16 rounding.
 
-All flag values are constants, so the sequence is CUDA Graph capturable. The mailbox is sized for
-the largest Text call (one prefill chunk or one decode/verify batch). Reduction association between
-device and host shares is a private choice; the oracle is the Sparse MoE formula in
-[the model reference](qwen3_5-model.md#sparse-moe).
+All flag values are constants and the map is read at run time, so the sequence is CUDA Graph
+capturable and graphs stay valid while slots change. The mailbox is sized for the largest Text
+call (one prefill chunk or one decode/verify batch). Reduction association between device and host
+shares, and which side computes a selection, are private choices; the oracle is the Sparse MoE
+formula in [the model reference](qwen3_5-model.md#sparse-moe).
+
+## Expert cache (dynamic residency)
+
+Routing is strongly local in time: the experts a layer chose for the last few dozen tokens are far
+more likely to be chosen next than the statically most frequent ones. With dynamic residency a
+cache thread of the host runtime keeps the slots on recently frequent experts:
+
+- **Score.** Every call's selections (both sides) update a per-layer decayed frequency
+  `f[e] <- f[e] * 2^(-T/16) + count` (half-life 16 routed token columns).
+- **Admission.** After a call, host-computed experts with `f >= 3` replace the slot-held expert of
+  lowest `f` if their own `f` is higher, at most two per layer and call. The threshold keeps the
+  copy traffic small: every copy reads the expert from host memory once, the same DRAM traffic as
+  computing it once on the CPU.
+- **Replacement protocol.** (1) The victim's map entry is set to -1 and the current request count
+  `n` is recorded (after a full fence). (2) Once the service thread has taken request `n+2`, every
+  call that could have read the old entry has finished its slot kernels, because the calls share
+  one stream and each ends with its request. (3) The new expert's plane spans are copied into the
+  slot on a separate non-blocking stream (relaxed capture mode, so a concurrent graph capture is
+  unaffected). (4) When the copy's event has completed, the new map entry is set. A slot is never
+  read while it is being written, and a selection is never computed twice or not at all.
+- Prefill chunks and verify batches update the scores like decode calls; a call simply uses
+  whatever the map holds when it routes.
+
+`HybridMoeHostRuntime::mapped_experts` and `replacements` expose the state for tests and
+diagnostics.
+
+### Expert cache results (Qwen3.8-Flash-Next)
+
+Offline replay of a routing trace (2,826 decode tokens of the four benchmark prompts, 64 slots per
+layer) predicted the hit rate of slot-held selections to rise from 32.7% with the
+statistics-ranked static choice to 64-68% with this policy, at about 14 copies per token; plain LRU
+admission reached 70-74% but needed 45-130 copies per token. `ninfer-serve` on the development host
+(see below; 64 slots per layer, `--max-context 2048`, greedy, mean of two repetitions, tok/s):
+
+| configuration | essay | code edit | translation | explanation |
+|---|---|---|---|---|
+| v0.3.0, no MTP (same day) | 14.37 | 12.61 | 13.33 | 13.80 |
+| v0.3.0, MTP 1 draft | 14.74 | 15.16 | 15.77 | 16.65 |
+| static slots (`--moe-static-experts`) | 15.34 | 13.56 | 14.28 | 14.77 |
+| dynamic slots | 24.08 | 19.17 | 19.16 | 21.76 |
+| dynamic slots, MTP 1 draft | 25.53 | 22.57 | 21.66 | 25.42 |
+| dynamic slots, MTP 2 drafts | 22.90 | 24.11 | 20.99 | 25.84 |
+| draft acceptance, dynamic, 1 draft | 58% | 97% | 85% | 84% |
+| draft acceptance, dynamic, 2 drafts | 42% | 94% | 73% | 75% |
+
+Repetitions differ by at most 1.3 tok/s (translation, 112 tokens). The static row is 7-8% faster
+than v0.3.0 because of the split route kernel; dynamic slots add 34-57% to that without MTP and
+29-63% with one draft (1.6-1.8x v0.3.0 without MTP). With
+the cache, one draft is still the best default on prose and two drafts win on code (+7%) while
+losing 10% on the essay. The resident set size of the server is unchanged (73.3 GB without MTP);
+the copies use about 6 ms of PCIe time per token.
+
+Accuracy. Which side computes a selection changes only reduction order, but in a top-10-of-512
+router such rounding differences occasionally flip a later routing decision or a near-tied
+token, as any change of placement does. Mean NLL of a 3,299-token English text (`--context 2048
+--stride 1024`): all experts on the host 0.749313, static lowest-id slots 0.745008, static
+statistics-ranked slots 0.747752, dynamic slots 0.744098 (two runs identical). Per-token NLL
+differs between the static placements by 0.056-0.058 on average and between dynamic and its
+static starting point by 0.019. A 256-token greedy CLI generation (code edit) was identical with
+static and dynamic slots, and 59-token NLL was identical (1.440390).
+
+Determinism. Slot changes are asynchronous, so the device/host split of a call depends on timing.
+Greedy outputs through `ninfer-serve` can therefore differ between runs with dynamic slots (the
+code-edit benchmark generated 385 and 399 tokens in two repetitions; static slots repeat exactly);
+use `--moe-static-experts` where bitwise repeatability matters.
 
 ## Host kernels
 
@@ -51,7 +128,9 @@ its output rows. Kernels require AVX2, FMA, F16C and BMI2, checked at startup.
 - `ninfer_host_rowsplit_dot_test`, `ninfer_host_moe_test`: host kernels and executor against FP64
   logical decode.
 - `ninfer_hybrid_sparse_moe_test`: complete hybrid Op against an FP64 oracle, including all-host,
-  all-resident, mixed residency and top-10 geometry.
+  all-slot, mixed residency and top-10 geometry, and two dynamic-residency sequences (48 calls of
+  one and three columns, partly back to back) during which the cache replaces slots; every call
+  is checked.
 - `ninfer_host_moe_bench`: host throughput at real bank sizes with a DRAM read reference.
 
 ## Qwen3.8-Flash-Next (Qwen4-Exp)
@@ -192,8 +271,10 @@ Draft acceptance of the FP32 reference predictor on four engine-generated sequen
 fraction at draft positions 1/2/3): translation 84/75/71%, code edit 95/94/94%, essay 57/52/49%,
 explanation 85/81/81%.
 
-Decode speed through `ninfer-serve` (same host and prompts as above, 64 resident experts,
-`--max-context 2048`, greedy, mean of two repetitions; repetitions differ by at most 0.5 tok/s):
+Decode speed through `ninfer-serve` measured with v0.3.0 (static resident experts and the
+single-block route kernel; same host and prompts as above, 64 resident experts, `--max-context
+2048`, greedy, mean of two repetitions; repetitions differ by at most 0.5 tok/s). Current numbers
+with the expert cache are in [Expert cache results](#expert-cache-results-qwen38-flash-next):
 
 | prompt | no MTP | 1 draft | 2 drafts | 3 drafts |
 |---|---|---|---|---|

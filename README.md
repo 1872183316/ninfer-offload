@@ -29,8 +29,9 @@ x8), Ubuntu, CUDA 12.8. Greedy decode, BF16 KV, 4 prompts x 2 repetitions:
 | Model (routed experts) | GPU experts per layer | Decode tok/s |
 |---|---|---|
 | Qwen3.8-Flash-Next, experts 4.58 bits/weight, 108 GB artifact | 0 (5.2 GB VRAM) | 10.0-10.2 |
-| | 64 | 12.5-14.1 |
-| | 64, MTP 1 draft (`ninfer-serve`) | 14.7-16.6 |
+| | 64, static (`--moe-static-experts`, `ninfer-serve`) | 13.6-15.3 |
+| | 64, expert cache (`ninfer-serve`) | 19.2-24.1 |
+| | 64, expert cache + MTP 1 draft (`ninfer-serve`) | 21.7-25.5 |
 | Qwen3.6-35B-A3B groupwise-int | 128 | 47.5-59.3 |
 | | 176 | 60.6-68.7 |
 
@@ -111,6 +112,13 @@ or add it to an existing conversion with `--reuse`, see the converter guide) acc
 (code edit 12.6 -> 15.2 tok/s); two or three drafts reach +32%/+39% on code but slow down free-form
 prose (-5%/-21% on the essay). `ninfer-run` turns MTP on with one draft when the model file has it
 (`--no-mtp`, `--draft-tokens N`). The published ModelScope conversion includes the MTP predictor.
+
+**Expert cache.** The `--moe-gpu-experts` slots follow recent routing: experts the router keeps
+choosing are copied into the GPU slots in the background, replacing the least used ones (decode
++34-57% over fixed slots on the benchmark prompts; with one MTP draft 1.6-1.8x v0.3.0 without MTP). The
+routing and mathematics are unchanged, but greedy output can vary between runs because which side
+computes an expert depends on timing; `--moe-static-experts` keeps the startup choice fixed.
+Details and accuracy checks are in the offload document.
 
 The OpenAI/Anthropic-compatible server accepts the same offload options (v0.2.0 or newer):
 
