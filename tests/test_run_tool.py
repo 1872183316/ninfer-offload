@@ -107,6 +107,36 @@ def test_local_models_resolve_without_network(tmp_path, monkeypatch):
         cached / "qwen3_8_flash_next.ninfer"
 
 
+def test_prebuilt_prefers_huggingface_only_when_it_answers(monkeypatch):
+    sources = (("huggingface", "a/hf"), ("modelscope", "b/ms"))
+    asked = []
+
+    def files(hub, repo):
+        asked.append(hub)
+        return {"m.ninfer": 1}
+
+    monkeypatch.setattr(run, "list_files", files)
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    monkeypatch.setattr(run, "reachable", lambda endpoint: False)
+    assert run.prebuilt_files(sources)[:2] == ("modelscope", "b/ms")
+    monkeypatch.setattr(run, "reachable", lambda endpoint: True)
+    assert run.prebuilt_files(sources)[:2] == ("huggingface", "a/hf")
+    assert asked == ["modelscope", "huggingface"]
+
+
+def test_prebuilt_falls_back_when_a_source_fails(monkeypatch):
+    def files(hub, repo):
+        if hub == "huggingface":
+            raise OSError("connection reset")
+        return {"m.ninfer": 1, "m.ninfer.part-0001": 2, "README.md": 3}
+
+    monkeypatch.setattr(run, "list_files", files)
+    monkeypatch.setattr(run, "reachable", lambda endpoint: True)
+    hub, repo, found = run.prebuilt_files((("huggingface", "a/hf"), ("modelscope", "b/ms")))
+    assert (hub, repo) == ("modelscope", "b/ms")
+    assert set(found) == {"m.ninfer", "m.ninfer.part-0001"}
+
+
 def test_only_ninfer_files_are_fetched():
     files = {"README.md": 1, "a.ninfer": 5, "a.ninfer.part-0001": 5, "SHA256SUMS": 1,
              "model-00001.safetensors": 9}

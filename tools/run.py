@@ -39,12 +39,15 @@ from tools.convert import download
 ROOT = Path(__file__).resolve().parents[1]
 GIB = 1 << 30
 
-# Repository id (lower case) -> (hub, repository with a ready .ninfer conversion).
+# Repository id (lower case) -> (hub, repository) sources of a ready .ninfer conversion, in order
+# of preference. A Hugging Face source that is not the last one is used only when huggingface.co
+# itself (or HF_ENDPOINT) answers; otherwise the next source is tried.
 PREBUILT = {
-    "qwen/qwen3.8-flash-next": ("modelscope", "mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload"),
-    "qwen/qwen3.6-35b-a3b": ("huggingface", "neroued/Qwen3.6-35B-A3B-NInfer"),
-    "qwen/qwen3.6-27b": ("huggingface", "neroued/Qwen3.6-27B-NInfer"),
-    "qwen/qwen3.8-27b": ("huggingface", "neroued/Qwen3.8-27B-NInfer"),
+    "qwen/qwen3.8-flash-next": (("huggingface", "luocha2050/Qwen3.8-Flash-Next-NInfer-Offload"),
+                                ("modelscope", "mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload")),
+    "qwen/qwen3.6-35b-a3b": (("huggingface", "neroued/Qwen3.6-35B-A3B-NInfer"),),
+    "qwen/qwen3.6-27b": (("huggingface", "neroued/Qwen3.6-27B-NInfer"),),
+    "qwen/qwen3.8-27b": (("huggingface", "neroued/Qwen3.8-27B-NInfer"),),
 }
 # Artifact metadata name -> routing statistics that rank GPU-resident experts.
 EXPERT_STATS = {
@@ -76,16 +79,21 @@ def entry_file(directory: Path) -> Path | None:
     return files[0] if len(files) == 1 else None
 
 
+def reachable(endpoint: str) -> bool:
+    try:
+        urllib.request.urlopen(urllib.request.Request(endpoint, headers=download.USER_AGENT),
+                               timeout=10).close()
+        return True
+    except OSError:
+        return False
+
+
 def hf_endpoint() -> str:
     if os.environ.get("HF_ENDPOINT"):
         return os.environ["HF_ENDPOINT"].rstrip("/")
     for endpoint in HF_ENDPOINTS:
-        try:
-            urllib.request.urlopen(urllib.request.Request(endpoint, headers=download.USER_AGENT),
-                                   timeout=10).close()
+        if reachable(endpoint):
             return endpoint
-        except (OSError, urllib.error.URLError):
-            continue
     raise SystemExit("neither huggingface.co nor hf-mirror.com is reachable; set HF_ENDPOINT")
 
 
@@ -107,6 +115,26 @@ def list_files(hub: str, repo: str) -> dict[str, int]:
 def ninfer_files(files: dict[str, int]) -> dict[str, int]:
     return {n: s for n, s in files.items()
             if n.endswith(".ninfer") or ".ninfer.part-" in n or n == "SHA256SUMS"}
+
+
+def prebuilt_files(sources) -> tuple[str, str, dict[str, int]]:
+    """The first usable source of a prebuilt conversion with its .ninfer files."""
+
+    for index, (hub, repo) in enumerate(sources):
+        last = index == len(sources) - 1
+        if (hub == "huggingface" and not last and not os.environ.get("HF_ENDPOINT")
+                and not reachable(HF_ENDPOINTS[0])):
+            continue
+        try:
+            files = ninfer_files(list_files(hub, repo))
+        except (OSError, KeyError, ValueError):
+            if last:
+                raise
+            log(f"{hub} {repo} is unavailable; trying the next source")
+            continue
+        if any(n.endswith(".ninfer") for n in files):
+            return hub, repo, files
+    raise SystemExit("no prebuilt source holds a .ninfer conversion")
 
 
 def fetch_prebuilt(hub: str, repo: str, files: dict[str, int], target: Path) -> Path:
@@ -225,9 +253,9 @@ def resolve(model: str, models_dir: Path, budget_gb: int) -> Path:
         log(f"using {entry}")
         return entry
     if model.lower() in PREBUILT:
-        hub, repo = PREBUILT[model.lower()]
+        hub, repo, files = prebuilt_files(PREBUILT[model.lower()])
         log(f"found a prebuilt conversion: {hub} {repo}")
-        return fetch_prebuilt(hub, repo, ninfer_files(list_files(hub, repo)), target)
+        return fetch_prebuilt(hub, repo, files, target)
     hub = "modelscope"
     try:
         files = list_files(hub, model)
@@ -555,8 +583,9 @@ def main() -> None:
     if args.dry_run:
         path = Path(args.model).expanduser()
         if not (path.is_file() or entry_file(models_dir / args.model.split("/")[-1])):
-            hub, repo = PREBUILT.get(args.model.lower(), ("?", "?"))
-            log(f"would fetch or convert {args.model} (prebuilt: {hub} {repo}) into {models_dir}")
+            sources = " or ".join(f"{h} {r}" for h, r in PREBUILT.get(args.model.lower(), ()))
+            log(f"would fetch or convert {args.model} (prebuilt: {sources or 'none'}) "
+                f"into {models_dir}")
             return
     model = resolve(args.model, models_dir, args.stream_budget_gb)
     facts = ModelFacts(model)
