@@ -57,8 +57,9 @@ Only the machine above has been tested.
 python -m tools.run Qwen/Qwen3.8-Flash-Next   # source tree
 ```
 
-`ninfer-run` finds a ready `.ninfer` conversion (the Flash-Next model below, the official NInfer
-Qwen3.6/3.8 conversions) or, from the source tree, converts the checkpoint with its official
+`ninfer-run` finds a ready `.ninfer` conversion (the Flash-Next model below, from Hugging Face when
+huggingface.co is reachable and otherwise from ModelScope; the official NInfer Qwen3.6/3.8
+conversions) or, from the source tree, converts the checkpoint with its official
 recipe by streaming; it stores models in `~/ninfer-models`, sizes `--moe-offload`, GPU experts,
 threads and context from free GPU and host memory, starts `ninfer-serve` and opens a terminal
 chat (`/think`, `/reset`, `/exit`). `--serve` keeps the OpenAI/Anthropic API running instead,
@@ -69,11 +70,15 @@ engine unchanged.
 
 Prebuilt Linux binaries (RTX 40-series) are on the
 [releases page](https://github.com/1872183316/ninfer-offload/releases) (v0.2.0 or newer for long contexts and the API server), and the
-converted Flash-Next model (110 GB, three files, with the MTP predictor; v0.3.0 or newer for MTP) is on ModelScope:
-[mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload](https://modelscope.cn/models/mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload).
+converted Flash-Next model (110 GB, three files, with the MTP predictor; v0.3.0 or newer for MTP) is on Hugging Face,
+[luocha2050/Qwen3.8-Flash-Next-NInfer-Offload](https://huggingface.co/luocha2050/Qwen3.8-Flash-Next-NInfer-Offload),
+and on ModelScope,
+[mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload](https://modelscope.cn/models/mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload)
+(the same files).
 
 ```bash
-modelscope download --model mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload --local_dir flashnext
+hf download luocha2050/Qwen3.8-Flash-Next-NInfer-Offload --local-dir flashnext
+# or: modelscope download --model mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload --local_dir flashnext
 ./ninfer flashnext/qwen3_8_flash_next.ninfer --prompt "Hello" --no-thinking \
   --max-context 2048 --kv-capacity 2048 \
   --moe-offload --moe-threads 12 --moe-gpu-experts 64 --moe-expert-stats stats/stats_flash_next.txt
@@ -111,7 +116,7 @@ or add it to an existing conversion with `--reuse`, see the converter guide) acc
 `--spec mtp --draft-tokens N`. With one draft, decode was 3-22% faster on the four benchmark prompts
 (code edit 12.6 -> 15.2 tok/s); two or three drafts reach +32%/+39% on code but slow down free-form
 prose (-5%/-21% on the essay). `ninfer-run` turns MTP on with one draft when the model file has it
-(`--no-mtp`, `--draft-tokens N`). The published ModelScope conversion includes the MTP predictor.
+(`--no-mtp`, `--draft-tokens N`). The published conversion includes the MTP predictor.
 
 **Expert cache.** The `--moe-gpu-experts` slots follow recent routing: experts the router keeps
 choosing are copied into the GPU slots in the background, replacing the least used ones (decode

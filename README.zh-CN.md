@@ -54,7 +54,8 @@ x8）、Ubuntu、CUDA 12.8。贪心解码、BF16 KV、4 个提示词各跑 2 遍
 python -m tools.run Qwen/Qwen3.8-Flash-Next   # 源码目录
 ```
 
-`ninfer-run` 会先找现成的 `.ninfer` 模型（下面的 Flash-Next 模型、NInfer 官方的 Qwen3.6/3.8 转换版），
+`ninfer-run` 会先找现成的 `.ninfer` 模型（下面的 Flash-Next 模型：能连上 huggingface.co 时从 Hugging Face
+下载，否则从 ModelScope；NInfer 官方的 Qwen3.6/3.8 转换版），
 找不到时（仅源码目录）用官方配方流式转换原版权重；模型存放在 `~/ninfer-models`。它根据空闲显存和内存
 自动决定 `--moe-offload`、GPU 专家数、线程数和上下文长度，启动 `ninfer-serve` 后在终端里直接对话
 （`/think` 切换思考，`/reset` 清空，`/exit` 退出）。`--serve` 改为常驻 OpenAI/Anthropic 接口，
@@ -63,11 +64,13 @@ python -m tools.run Qwen/Qwen3.8-Flash-Next   # 源码目录
 ## 快速开始：免编译、免转换
 
 预编译的 Linux 程序（RTX 40 系）在 [Releases 页面](https://github.com/1872183316/ninfer-offload/releases)
-（长上下文和 API 服务需 v0.2.0 或更新），转换好的 Flash-Next 模型（110 GB，3 个文件，含 MTP 预测层；使用 MTP 需 v0.3.0 或更新）在 ModelScope：
-[mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload](https://modelscope.cn/models/mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload)。
+（长上下文和 API 服务需 v0.2.0 或更新），转换好的 Flash-Next 模型（110 GB，3 个文件，含 MTP 预测层；使用 MTP 需 v0.3.0 或更新）在
+Hugging Face：[luocha2050/Qwen3.8-Flash-Next-NInfer-Offload](https://huggingface.co/luocha2050/Qwen3.8-Flash-Next-NInfer-Offload)，
+以及 ModelScope：[mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload](https://modelscope.cn/models/mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload)（文件相同）。
 
 ```bash
-modelscope download --model mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload --local_dir flashnext
+hf download luocha2050/Qwen3.8-Flash-Next-NInfer-Offload --local-dir flashnext
+# 或者：modelscope download --model mymodel3861/Qwen3.8-Flash-Next-NInfer-Offload --local_dir flashnext
 ./ninfer flashnext/qwen3_8_flash_next.ninfer --prompt "你好" --no-thinking \
   --max-context 2048 --kv-capacity 2048 \
   --moe-offload --moe-threads 12 --moe-gpu-experts 64 --moe-expert-stats stats/stats_flash_next.txt
@@ -103,7 +106,7 @@ python -m tools.convert --model flashnext-hf --recipe qwen3_8_flash_next --out q
 在已有转换上补上，见转换器说明）可以加 `--spec mtp --draft-tokens N`。每轮 1 个草稿时，4 个测试提示词
 的解码快了 3%～22%（改代码从 12.6 提到 15.2 tok/s）；2 或 3 个草稿在代码上能快 32%/39%，但写散文会变慢
 （作文 -5%/-21%）。模型文件带 MTP 时 `ninfer-run` 默认开启 1 个草稿（`--no-mtp` 关闭，`--draft-tokens N`
-调整）。ModelScope 上已发布的转换包含 MTP 预测层。
+调整）。已发布的转换包含 MTP 预测层。
 
 **专家缓存。** `--moe-gpu-experts` 的显存槽位会跟随最近的路由：路由反复选中的专家会在后台复制进 GPU
 槽位，替换最少用的专家（在测试提示上解码比固定放置快 34%～57%；再开 1 个 MTP 草稿，是 v0.3.0 不开 MTP 时的 1.6～1.8 倍）。
